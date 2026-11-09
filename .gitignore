@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime data and secrets
+bridge.env
+service.env
+*.db
+*.db-shm
+*.db-wal
+*.log
+backups/
+temp/
+app-backup-*/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
