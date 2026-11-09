@@ -46,7 +46,9 @@
 
 ## 部署
 
-以下以 Debian/Ubuntu + systemd、专用用户 `oc`、安装目录 `$HOME/feishu-opencode-bridge` 为例。桥接器使用 systemd 模板 unit，实例名就是运行用户；换用户时只需换实例名，不需要改 unit 文件。数据目录默认与安装目录相同，也可以用 `BRIDGE_DATA_DIR` 单独指定。
+**推荐方式：模板 unit + 普通用户。** 桥接器直接以当前登录用户（通常也是运行 OpenCode 的用户）运行，安装目录固定为 `$HOME/feishu-opencode-bridge`，systemd 实例名就是该用户名。不需要创建专用用户，也不需要改 unit 文件。
+
+以下以 Debian/Ubuntu + systemd 为例，命令中的 `$USER` 会展开为当前登录用户。旧的专用 `oc` 用户装法仍然兼容，见「[兼容旧版 oc 专用用户](#兼容旧版-oc-专用用户)」。
 
 ### 1. 前置条件
 
@@ -69,6 +71,8 @@
 ### 3. OpenCode 服务
 
 如果你已经有独立的 OpenCode 安装脚本，可以跳过本节；桥接器只要求 `OPENCODE_BASE_URL` 可访问，不依赖 `opencode-serve.service` 这个 unit 名。
+
+下面的 unit 示例沿用旧版 `oc` 用户；如果你用普通用户运行 OpenCode，把 `User`、`Group`、`WorkingDirectory`、`EnvironmentFile`、`ExecStart` 中的 `/home/oc` 换成你的家目录即可。
 
 安装 OpenCode V2（例如 `curl -fsSL https://opencode.ai/v2/install | bash`），准备：
 
@@ -97,36 +101,32 @@ sudo systemctl enable --now opencode-serve
 
 ### 4. 安装桥接器
 
-```bash
-BRIDGE_USER=oc
-BRIDGE_HOME=/home/$BRIDGE_USER/feishu-opencode-bridge
+以普通用户身份安装，不需要 `sudo`：
 
-sudo useradd --create-home --user-group --shell /bin/bash "$BRIDGE_USER"   # 已存在则跳过
-sudo -u "$BRIDGE_USER" git clone https://github.com/francisgao1999/feishu-bridge.git "$BRIDGE_HOME"
-sudo -u "$BRIDGE_USER" python3.13 -m venv "$BRIDGE_HOME/.venv"
-sudo -u "$BRIDGE_USER" "$BRIDGE_HOME/.venv/bin/pip" install -r "$BRIDGE_HOME/requirements.txt"
-sudo -u "$BRIDGE_USER" cp "$BRIDGE_HOME/bridge.env.example" "$BRIDGE_HOME/bridge.env"
-sudo chmod 600 "$BRIDGE_HOME/bridge.env"
-sudo chmod +x "$BRIDGE_HOME/backup.sh"
+```bash
+cd "$HOME"
+git clone https://github.com/francisgao1999/feishu-bridge.git feishu-opencode-bridge
+cd feishu-opencode-bridge
+python3.13 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp bridge.env.example bridge.env
+chmod 600 bridge.env
+chmod +x backup.sh
+mkdir -p workspace temp
 ```
 
 编辑 `bridge.env`，至少填写 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_ALLOWED_OPEN_IDS`、`OPENCODE_PASSWORD`。路径默认值：
 
+- `BRIDGE_HOME` 默认是仓库根目录（`$HOME/feishu-opencode-bridge`）
 - `OPENCODE_DIRECTORY=$BRIDGE_HOME/workspace`
 - `BRIDGE_DATA_DIR` 默认等于 `BRIDGE_HOME`
 - `BRIDGE_DB=$BRIDGE_DATA_DIR/bridge.db`
 - `BRIDGE_LOG=$BRIDGE_DATA_DIR/bridge.log`
 - `BRIDGE_TEMP_WORKSPACE_ROOT=$BRIDGE_DATA_DIR/temp`
 
-创建默认工作目录和临时目录：
+上面的 `mkdir -p workspace temp` 已经创建了默认目录。如果 OpenCode 以其他用户运行，确保该用户也能读写 `$HOME/feishu-opencode-bridge/workspace` 和 `$HOME/feishu-opencode-bridge/temp`。
 
-```bash
-sudo -u "$BRIDGE_USER" mkdir -p "$BRIDGE_HOME/workspace" "$BRIDGE_HOME/temp"
-```
-
-如果 OpenCode 以其他用户运行，确保该用户也能读写 `$BRIDGE_HOME/workspace` 和 `$BRIDGE_HOME/temp`。
-
-GitHub 仓库中的源码位于 `app/`；systemd 以 `$BRIDGE_HOME` 为工作目录，执行 `app/main.py`。
+GitHub 仓库中的源码位于 `app/`；systemd 以 `$HOME/feishu-opencode-bridge` 为工作目录，执行 `app/main.py`。
 
 ### 5. 桥接器 systemd
 
@@ -139,15 +139,15 @@ GitHub 仓库中的源码位于 `app/`；systemd 以 `$BRIDGE_HOME` 为工作目
 - 不依赖 `opencode-serve.service`；只要 `OPENCODE_BASE_URL` 可访问即可
 - `MemoryMax=384M`、`NoNewPrivileges=true`、`PrivateTmp=true`
 
-安装（以 `oc` 用户为例）：
+安装（实例名 = 运行用户，推荐直接用当前登录用户）：
 
 ```bash
 sudo cp deploy/feishu-opencode-bridge@.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now feishu-opencode-bridge@oc
+sudo systemctl enable --now feishu-opencode-bridge@$USER
 ```
 
-换用户时只改实例名，例如 `feishu-opencode-bridge@bridge`。
+`$USER` 会由当前 shell 展开。如果 OpenCode 以其他用户运行，把实例名换成那个用户名，并确保该用户对 `$HOME/feishu-opencode-bridge` 有读写权限。
 
 ### 6. 备份定时器
 
@@ -158,7 +158,7 @@ sudo systemctl enable --now feishu-opencode-bridge@oc
 ```bash
 sudo cp deploy/feishu-opencode-bridge-backup@.service deploy/feishu-opencode-bridge-backup@.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now feishu-opencode-bridge-backup@oc.timer
+sudo systemctl enable --now feishu-opencode-bridge-backup@$USER.timer
 ```
 
 `backup.sh` 会自己定位安装目录并读取 `bridge.env`，因此 `BRIDGE_DB`、`BRIDGE_ENV_FILE` 改了也能正确备份。备份目录默认是 `$BRIDGE_HOME/backups`，可以用 `BRIDGE_BACKUP_DIR` 改到其他磁盘；需要异地备份时，把该目录同步到远端即可。
@@ -167,8 +167,8 @@ sudo systemctl enable --now feishu-opencode-bridge-backup@oc.timer
 
 ```bash
 sudo systemctl status opencode-serve
-sudo systemctl status feishu-opencode-bridge@oc
-journalctl -u feishu-opencode-bridge@oc -f
+sudo systemctl status feishu-opencode-bridge@$USER
+journalctl -u feishu-opencode-bridge@$USER -f
 ```
 
 在飞书私聊机器人发送 `/help`，再发送 `/status`；能收到回复即部署成功。日志开头会打印 `bridge home=... data=...`，可用来确认实际路径。
@@ -182,7 +182,7 @@ cd "$HOME/feishu-opencode-bridge"
 ./backup.sh
 git pull --ff-only
 .venv/bin/pip install -r requirements.txt
-sudo systemctl restart feishu-opencode-bridge@oc
+sudo systemctl restart feishu-opencode-bridge@$USER
 ```
 
 如果服务器直连 GitHub 较慢，先加载 OpenCode 的代理环境再拉取：
@@ -236,13 +236,13 @@ export FEISHU_TEST_CHAT_ID=oc_xxx
 | `feishu-opencode-bridge@<用户>.service` | 飞书桥接器，实例名是运行用户 |
 | `feishu-opencode-bridge-backup@<用户>.timer` | 每日 03:30 备份，保留 7 天 |
 
-常用命令（以 `oc` 用户为例）：
+常用命令（实例名 = 运行用户，下面用 `$USER`）：
 
 ```bash
 sudo systemctl status opencode-serve
-sudo systemctl status feishu-opencode-bridge@oc
-sudo systemctl restart feishu-opencode-bridge@oc
-journalctl -u feishu-opencode-bridge@oc -f
+sudo systemctl status feishu-opencode-bridge@$USER
+sudo systemctl restart feishu-opencode-bridge@$USER
+journalctl -u feishu-opencode-bridge@$USER -f
 tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 ```
 
@@ -419,7 +419,7 @@ tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `BRIDGE_HOME` | 仓库根目录 | 安装目录；`bridge.env` 默认在这里 |
+| `BRIDGE_HOME` | 仓库根目录 | 安装目录；默认 `bridge.env` 也在这里 |
 | `BRIDGE_DATA_DIR` | `$BRIDGE_HOME` | 数据目录；相对路径按 `BRIDGE_HOME` 解析 |
 | `BRIDGE_DB` | `$BRIDGE_DATA_DIR/bridge.db` | SQLite 数据库 |
 | `BRIDGE_LOG` | `$BRIDGE_DATA_DIR/bridge.log` | 日志文件 |
@@ -427,12 +427,14 @@ tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 | `OPENCODE_DIRECTORY` | `$BRIDGE_HOME/workspace` | 普通会话工作目录 |
 | `BRIDGE_BACKUP_DIR` | `$BRIDGE_HOME/backups` | 备份输出目录（仅 `backup.sh`） |
 
+优先级从高到低：**进程环境变量 > `bridge.env` > 默认值**。`BRIDGE_HOME` / `BRIDGE_DATA_DIR` 的完整优先级和相对路径规则见「[用户与路径](#用户与路径)」。
+
 `BRIDGE_ENV_FILE` 只在启动前通过环境变量指定，不能写在 `bridge.env` 里；默认是 `$BRIDGE_HOME/bridge.env`。
 
 修改后重启：
 
 ```bash
-sudo systemctl restart feishu-opencode-bridge@oc
+sudo systemctl restart feishu-opencode-bridge@$USER
 ```
 
 ## 备份与恢复
@@ -448,7 +450,7 @@ sudo systemctl restart feishu-opencode-bridge@oc
 恢复（先停服务，并删除 WAL/SHM 残留；如果自定义了 `BRIDGE_DATA_DIR` / `BRIDGE_DB`，把下面的数据库路径换成实际路径）：
 
 ```bash
-sudo systemctl stop feishu-opencode-bridge@oc
+sudo systemctl stop feishu-opencode-bridge@$USER
 rm -rf /tmp/bridge-restore
 mkdir -p /tmp/bridge-restore
 tar -xzf "$HOME/feishu-opencode-bridge/backups/bridge-YYYYmmdd-HHMMSS.tar.gz" \
@@ -458,7 +460,7 @@ rm -f "$DB-wal" "$DB-shm"
 cp /tmp/bridge-restore/bridge.db "$DB"
 cp /tmp/bridge-restore/bridge.env "$HOME/feishu-opencode-bridge/bridge.env"
 chmod 600 "$HOME/feishu-opencode-bridge/bridge.env"
-sudo systemctl start feishu-opencode-bridge@oc
+sudo systemctl start feishu-opencode-bridge@$USER
 ```
 
 注意：恢复数据库前先停服务并删除 `bridge.db-wal` / `bridge.db-shm`，否则 SQLite 可能继续使用旧的 WAL；`bridge.env` 含密钥，权限保持 600。需要异地备份时，把 `$BRIDGE_BACKUP_DIR` 同步到远端存储即可。
@@ -466,7 +468,7 @@ sudo systemctl start feishu-opencode-bridge@oc
 ## 故障排查
 
 - **机器人不回消息**
-  - 检查 `systemctl status feishu-opencode-bridge@oc`
+  - 检查 `systemctl status feishu-opencode-bridge@$USER`
   - 飞书应用是否已发布
   - 是否启用“使用长连接接收事件”
   - 是否订阅 `im.message.receive_v1`
@@ -496,18 +498,61 @@ sudo systemctl start feishu-opencode-bridge@oc
   - 检查 systemd 实例名是否与运行用户一致（`feishu-opencode-bridge@<用户>`）。
   - `BRIDGE_ENV_FILE` 只能通过环境变量或 unit 指定，不能写在 `bridge.env` 里。
 
-## 自定义用户 / 路径
+## 用户与路径
 
-桥接器使用 systemd 模板 unit，实例名就是运行用户：
+### 推荐：普通用户 + 模板 unit
+
+桥接器推荐以当前登录用户运行，实例名就是用户名：
 
 ```bash
-sudo systemctl enable --now feishu-opencode-bridge@bridge
-sudo systemctl enable --now feishu-opencode-bridge-backup@bridge.timer
+sudo systemctl enable --now feishu-opencode-bridge@$USER
+sudo systemctl enable --now feishu-opencode-bridge-backup@$USER.timer
 ```
 
-unit 使用 `WorkingDirectory=~` 和 `$HOME` 定位安装目录，因此安装目录固定为 `$HOME/feishu-opencode-bridge`，不依赖 `/home/<用户>` 这种固定路径。如果需要把数据放到其他位置，在 `bridge.env` 中设置：
+unit 使用 `WorkingDirectory=~` 和 `$HOME` 定位安装目录，因此安装目录固定为 `$HOME/feishu-opencode-bridge`，不依赖 `/home/<用户>` 这种固定路径。普通用户只需要在安装 systemd unit 时使用 `sudo`，日常运行、升级和备份都不需要 root。
+
+### 兼容旧版 oc 专用用户
+
+以前的专用 `oc` 用户装法仍然可用，不需要改 unit 文件，只要把实例名换成 `oc`：
 
 ```bash
+sudo systemctl enable --now feishu-opencode-bridge@oc
+sudo systemctl enable --now feishu-opencode-bridge-backup@oc.timer
+```
+
+如果 `oc` 用户的家目录是 `/home/oc`，安装目录就是 `/home/oc/feishu-opencode-bridge`，与旧版一致。旧版 `bridge.env` 里显式写死的 `/home/oc/...` 路径也能继续使用；新变量都有默认值，不迁移也能跑。
+
+### BRIDGE_HOME / BRIDGE_DATA_DIR 优先级
+
+`BRIDGE_HOME` 和 `BRIDGE_DATA_DIR` 都按以下优先级取值，从高到低：
+
+1. **进程环境变量**：systemd unit 的 `Environment=` / `EnvironmentFile=`、shell `export`、`systemctl set-environment` 等
+2. **`bridge.env` 中的值**
+3. **默认值**
+
+具体默认值和相对路径解析基准：
+
+| 变量 | 默认值 | 相对路径解析基准 |
+| --- | --- | --- |
+| `BRIDGE_HOME` | 仓库根目录 | 绝对路径或 `~`；相对路径按进程工作目录解析 |
+| `BRIDGE_DATA_DIR` | `$BRIDGE_HOME` | `$BRIDGE_HOME` |
+| `BRIDGE_DB` | `$BRIDGE_DATA_DIR/bridge.db` | `$BRIDGE_DATA_DIR` |
+| `BRIDGE_LOG` | `$BRIDGE_DATA_DIR/bridge.log` | `$BRIDGE_DATA_DIR` |
+| `BRIDGE_TEMP_WORKSPACE_ROOT` | `$BRIDGE_DATA_DIR/temp` | `$BRIDGE_DATA_DIR` |
+| `OPENCODE_DIRECTORY` | `$BRIDGE_HOME/workspace` | `$BRIDGE_HOME` |
+| `BRIDGE_BACKUP_DIR` | `$BRIDGE_HOME/backups` | `$BRIDGE_HOME`（仅 `backup.sh`） |
+
+注意：
+
+- `BRIDGE_ENV_FILE` 是启动引导变量，只能来自进程环境，不能写在 `bridge.env` 里；默认 `$BRIDGE_HOME/bridge.env`，相对路径按 `BRIDGE_HOME` 解析。
+- 如果 `BRIDGE_HOME` 只写在 `bridge.env` 里，`bridge.env` 本身仍从默认位置（仓库根目录）加载；`BRIDGE_HOME` 只影响后续路径解析。要改变 `bridge.env` 的加载位置，必须通过进程环境设置 `BRIDGE_HOME` 或 `BRIDGE_ENV_FILE`。
+- 进程环境优先于 `bridge.env`，所以 systemd drop-in 里的 `Environment=BRIDGE_DATA_DIR=...` 会覆盖 `bridge.env` 中的同名变量。
+- 把数据放到其他位置时，在 `bridge.env` 中设置 `BRIDGE_DATA_DIR` 即可；`BRIDGE_DB` / `BRIDGE_LOG` / `BRIDGE_TEMP_WORKSPACE_ROOT` 会自动跟随。需要单独指定时再覆盖它们。
+
+示例：
+
+```bash
+# bridge.env
 BRIDGE_DATA_DIR=/var/lib/feishu-bridge
 # 或者分别指定
 BRIDGE_DB=/var/lib/feishu-bridge/bridge.db
@@ -515,7 +560,7 @@ BRIDGE_LOG=/var/lib/feishu-bridge/bridge.log
 BRIDGE_TEMP_WORKSPACE_ROOT=/var/lib/feishu-bridge/temp
 ```
 
-相对路径按 `BRIDGE_DATA_DIR` 解析；`OPENCODE_DIRECTORY` 的相对路径按 `BRIDGE_HOME` 解析。确保运行用户和 OpenCode 都能读写这些目录。
+确保运行用户和 OpenCode 都能读写这些目录。
 
 ## 从旧版本升级
 
@@ -552,6 +597,8 @@ journalctl -u feishu-opencode-bridge@oc -n 50
 ```
 
 旧版 `bridge.env` 可以继续使用；新变量都有默认值，不需要改。若旧版显式写了 `/home/oc/...` 路径也能正常工作。
+
+如果旧版使用专用 `oc` 用户，迁移后继续用 `@oc` 实例即可，不需要改 unit 文件；如果改用普通用户，把实例名换成该用户名，并确保该用户对安装目录有读写权限。
 
 ## 安全
 
