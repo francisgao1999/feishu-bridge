@@ -6,6 +6,8 @@ venv/
 # Runtime data and secrets
 bridge.env
 service.env
+bridge.env.bak-*
+service.env.bak-*
 *.db
 *.db-shm
 *.db-wal
