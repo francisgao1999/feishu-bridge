@@ -151,14 +151,24 @@ journalctl -u feishu-opencode-bridge -f
 
 ### 8. 升级
 
+服务器目录已经是 Git 仓库，以 `oc` 用户拉取即可：
+
 ```bash
-sudo systemctl stop feishu-opencode-bridge
-sudo -u oc /home/oc/feishu-opencode-bridge/backup.sh
-sudo cp -r app/. /home/oc/feishu-opencode-bridge/app/
-sudo cp requirements.txt /home/oc/feishu-opencode-bridge/
-sudo chown -R oc:oc /home/oc/feishu-opencode-bridge/app /home/oc/feishu-opencode-bridge/requirements.txt
-sudo -u oc /home/oc/feishu-opencode-bridge/.venv/bin/pip install -r /home/oc/feishu-opencode-bridge/requirements.txt
-sudo systemctl start feishu-opencode-bridge
+cd /home/oc/feishu-opencode-bridge
+sudo -u oc ./backup.sh
+git pull --ff-only
+sudo -u oc .venv/bin/pip install -r requirements.txt
+sudo systemctl restart feishu-opencode-bridge
+```
+
+如果服务器直连 GitHub 较慢，先加载 OpenCode 的代理环境再拉取：
+
+```bash
+set -a
+source /home/oc/.config/opencode/service.env
+set +a
+export https_proxy="$HTTPS_PROXY" http_proxy="$HTTP_PROXY"
+git pull --ff-only
 ```
 
 数据库结构由 `db.init()` 在启动时自动创建/迁移；升级前仍建议先备份。
