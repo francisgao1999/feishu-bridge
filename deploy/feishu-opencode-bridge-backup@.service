@@ -4,4 +4,5 @@ Description=Backup Feishu-OpenCode bridge data (%i)
 [Service]
 Type=oneshot
 User=%i
-ExecStart=%h/feishu-opencode-bridge/backup.sh
+WorkingDirectory=~
+ExecStart=/bin/bash -c 'exec "$HOME/feishu-opencode-bridge/backup.sh"'

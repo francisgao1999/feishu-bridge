@@ -133,9 +133,9 @@ GitHub 仓库中的源码位于 `app/`；systemd 以 `$BRIDGE_HOME` 为工作目
 `/etc/systemd/system/feishu-opencode-bridge@.service` 见 [`deploy/feishu-opencode-bridge@.service`](deploy/feishu-opencode-bridge@.service)，关键配置：
 
 - `User=%i`：实例名就是运行用户
-- `WorkingDirectory=%h/feishu-opencode-bridge`
-- `EnvironmentFile=%h/feishu-opencode-bridge/bridge.env`
-- `ExecStart=%h/feishu-opencode-bridge/.venv/bin/python %h/feishu-opencode-bridge/app/main.py`
+- `WorkingDirectory=~`：解析为该用户的家目录
+- `ExecStart` 通过 `$HOME` 定位安装目录，兼容任意家目录
+- 不依赖 `EnvironmentFile`；`app/config.py` 会自己加载 `$HOME/feishu-opencode-bridge/bridge.env`
 - 不依赖 `opencode-serve.service`；只要 `OPENCODE_BASE_URL` 可访问即可
 - `MemoryMax=384M`、`NoNewPrivileges=true`、`PrivateTmp=true`
 
@@ -505,7 +505,7 @@ sudo systemctl enable --now feishu-opencode-bridge@bridge
 sudo systemctl enable --now feishu-opencode-bridge-backup@bridge.timer
 ```
 
-unit 中的 `%h` 会自动展开为该用户的家目录，因此安装目录固定为 `$HOME/feishu-opencode-bridge`。如果需要把数据放到其他位置，在 `bridge.env` 中设置：
+unit 使用 `WorkingDirectory=~` 和 `$HOME` 定位安装目录，因此安装目录固定为 `$HOME/feishu-opencode-bridge`，不依赖 `/home/<用户>` 这种固定路径。如果需要把数据放到其他位置，在 `bridge.env` 中设置：
 
 ```bash
 BRIDGE_DATA_DIR=/var/lib/feishu-bridge
