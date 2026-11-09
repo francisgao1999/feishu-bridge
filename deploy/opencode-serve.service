@@ -1,0 +1,23 @@
+[Unit]
+Description=OpenCode V2 API server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oc
+Group=oc
+WorkingDirectory=/home/oc/workspace
+Environment=HOME=/home/oc
+Environment=XDG_CONFIG_HOME=/home/oc/.config
+Environment=XDG_DATA_HOME=/home/oc/.local/share
+Environment=XDG_STATE_HOME=/home/oc/.local/state
+Environment=XDG_CACHE_HOME=/home/oc/.cache
+Environment=PATH=/home/oc/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/oc/.config/opencode/service.env
+ExecStart=/home/oc/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4096 --print-logs --log-level info
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

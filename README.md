@@ -22,11 +22,142 @@
 │   ├── opencode.py
 │   ├── permissions.py
 │   └── ws_patch.py
+├── deploy/              # systemd unit 文件（与当前服务器一致）
+│   ├── opencode-serve.service
+│   ├── feishu-opencode-bridge.service
+│   ├── feishu-opencode-bridge-backup.service
+│   └── feishu-opencode-bridge-backup.timer
 ├── backup.sh            # 备份脚本
 ├── requirements.txt     # Python 依赖
 ├── bridge.env.example   # 环境变量示例
 └── README.md
 ```
+
+## 部署
+
+以下以 Debian/Ubuntu + systemd、专用用户 `oc`、安装目录 `/home/oc/feishu-opencode-bridge` 为例；路径不同时同步修改 `bridge.env` 和 unit 文件。`deploy/` 下的 unit 文件与当前服务器 `/etc/systemd/system/` 中的配置一致。
+
+### 1. 前置条件
+
+- Linux + systemd
+- Python 3.13（含 `venv`，Debian/Ubuntu 还需 `python3.13-venv`）
+- OpenCode V2，能通过 `opencode serve` 启动
+- 飞书企业自建应用，已开启机器人能力
+
+### 2. 飞书应用
+
+1. 在飞书开放平台创建企业自建应用，记录 App ID / App Secret。
+2. 开启「机器人」能力。
+3. 事件订阅选择「使用长连接接收事件」，订阅 `im.message.receive_v1`。
+4. 卡片回调选择「使用长连接接收回调」，订阅 `card.action.trigger`。
+5. 按需申请权限：接收单聊消息、以应用身份发消息、更新消息卡片等。
+6. 发布应用。
+
+不需要公网 IP、回调地址或内网穿透。`FEISHU_ALLOWED_OPEN_IDS` 留空表示不限制；建议部署后先发送 `/whoami` 获取自己的 `open_id`，再填入白名单并重启。
+
+### 3. OpenCode 服务
+
+安装 OpenCode V2（例如 `curl -fsSL https://opencode.ai/v2/install | bash`），准备：
+
+- `~/.config/opencode/opencode.jsonc`：provider、model、agent、MCP 配置。
+- `~/.config/opencode/service.env`：代理、API Key、服务密码。V2 用 `OPENCODE_SERVER_PASSWORD` 开启 HTTP Basic 认证，用户名默认 `opencode`。
+
+`/etc/systemd/system/opencode-serve.service` 见 [`deploy/opencode-serve.service`](deploy/opencode-serve.service)，关键配置：
+
+- `User=oc`、`Group=oc`
+- `WorkingDirectory=/home/oc/workspace`
+- `EnvironmentFile=/home/oc/.config/opencode/service.env`
+- `ExecStart=/home/oc/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4096 --print-logs --log-level info`
+- `Restart=always`、`RestartSec=3`
+
+安装：
+
+```bash
+sudo cp deploy/opencode-serve.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now opencode-serve
+```
+
+确认 `bridge.env` 的 `OPENCODE_USERNAME` / `OPENCODE_PASSWORD`、`service.env` 的 `OPENCODE_SERVER_PASSWORD`、`service.json` 的 `password` 三者一致。
+
+桥接器按 `/api/...` 路径调用 OpenCode；升级 OpenCode 后如果接口路径有变化，需要同步调整 `app/opencode.py`。
+
+### 4. 安装桥接器
+
+```bash
+sudo useradd --create-home --user-group --shell /bin/bash oc   # 已存在则跳过
+sudo mkdir -p /home/oc/feishu-opencode-bridge/app
+sudo cp -r app/. /home/oc/feishu-opencode-bridge/app/
+sudo cp requirements.txt bridge.env.example backup.sh /home/oc/feishu-opencode-bridge/
+sudo cp bridge.env.example /home/oc/feishu-opencode-bridge/bridge.env
+sudo chown -R oc:oc /home/oc/feishu-opencode-bridge
+sudo -u oc python3.13 -m venv /home/oc/feishu-opencode-bridge/.venv
+sudo -u oc /home/oc/feishu-opencode-bridge/.venv/bin/pip install -r /home/oc/feishu-opencode-bridge/requirements.txt
+sudo chmod 600 /home/oc/feishu-opencode-bridge/bridge.env
+sudo chmod +x /home/oc/feishu-opencode-bridge/backup.sh
+```
+
+编辑 `bridge.env`，至少填写 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_ALLOWED_OPEN_IDS`、`OPENCODE_PASSWORD`；确认 `OPENCODE_DIRECTORY`、`BRIDGE_DB`、`BRIDGE_LOG`、`BRIDGE_TEMP_WORKSPACE_ROOT` 的目录存在且 `oc` 可写：
+
+```bash
+sudo -u oc mkdir -p /home/oc/workspace /home/oc/feishu-opencode-bridge/temp
+```
+
+GitHub 仓库中的源码位于 `app/`，直接复制整个目录即可；systemd 以 `/home/oc/feishu-opencode-bridge` 为工作目录，执行 `app/main.py`。
+
+### 5. 桥接器 systemd
+
+`/etc/systemd/system/feishu-opencode-bridge.service` 见 [`deploy/feishu-opencode-bridge.service`](deploy/feishu-opencode-bridge.service)，关键配置：
+
+- `User=oc`、`Group=oc`
+- `WorkingDirectory=/home/oc/feishu-opencode-bridge`
+- `EnvironmentFile=/home/oc/feishu-opencode-bridge/bridge.env`
+- `ExecStart=/home/oc/feishu-opencode-bridge/.venv/bin/python /home/oc/feishu-opencode-bridge/app/main.py`
+- `Requires=opencode-serve.service`
+- `MemoryMax=384M`、`NoNewPrivileges=true`、`PrivateTmp=true`
+
+安装：
+
+```bash
+sudo cp deploy/feishu-opencode-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now feishu-opencode-bridge
+```
+
+### 6. 备份定时器
+
+备份 unit 见 [`deploy/feishu-opencode-bridge-backup.service`](deploy/feishu-opencode-bridge-backup.service) 和 [`deploy/feishu-opencode-bridge-backup.timer`](deploy/feishu-opencode-bridge-backup.timer)。
+
+安装：
+
+```bash
+sudo cp deploy/feishu-opencode-bridge-backup.service deploy/feishu-opencode-bridge-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now feishu-opencode-bridge-backup.timer
+```
+
+### 7. 验证
+
+```bash
+sudo systemctl status opencode-serve feishu-opencode-bridge
+journalctl -u feishu-opencode-bridge -f
+```
+
+在飞书私聊机器人发送 `/help`，再发送 `/status`；能收到回复即部署成功。
+
+### 8. 升级
+
+```bash
+sudo systemctl stop feishu-opencode-bridge
+sudo -u oc /home/oc/feishu-opencode-bridge/backup.sh
+sudo cp -r app/. /home/oc/feishu-opencode-bridge/app/
+sudo cp requirements.txt /home/oc/feishu-opencode-bridge/
+sudo chown -R oc:oc /home/oc/feishu-opencode-bridge/app /home/oc/feishu-opencode-bridge/requirements.txt
+sudo -u oc /home/oc/feishu-opencode-bridge/.venv/bin/pip install -r /home/oc/feishu-opencode-bridge/requirements.txt
+sudo systemctl start feishu-opencode-bridge
+```
+
+数据库结构由 `db.init()` 在启动时自动创建/迁移；升级前仍建议先备份。
 
 ## 服务
 
@@ -208,7 +339,9 @@ tail -f /home/oc/feishu-opencode-bridge/bridge.log
   - 临时工作目录根路径 `BRIDGE_TEMP_WORKSPACE_ROOT`（默认 `/home/oc/feishu-opencode-bridge/temp`）
   - 仓库中的 `bridge.env.example` 是变量模板，复制为 `bridge.env` 后填写
 - `/home/oc/.config/opencode/service.env`（600）
-  - OpenCode 服务环境变量：代理、API Key、服务密码
+  - OpenCode 服务环境变量：代理、API Key、服务密码 `OPENCODE_SERVER_PASSWORD`
+- `/home/oc/.config/opencode/service.json`（600）
+  - OpenCode 服务密码 `password`，需与 `service.env` 的 `OPENCODE_SERVER_PASSWORD`、`bridge.env` 的 `OPENCODE_PASSWORD` 保持一致
 - `/home/oc/.config/opencode/opencode.jsonc`
   - 模型、agent、MCP 配置
 
@@ -225,19 +358,21 @@ sudo systemctl restart feishu-opencode-bridge
 手动备份：
 
 ```bash
-/home/oc/feishu-opencode-bridge/backup.sh
+sudo -u oc /home/oc/feishu-opencode-bridge/backup.sh
 ```
 
 恢复：
 
 ```bash
 sudo systemctl stop feishu-opencode-bridge
-mkdir -p /tmp/bridge-restore
-tar -xzf /home/oc/feishu-opencode-bridge/backups/bridge-YYYYmmdd-HHMMSS.tar.gz \
+sudo rm -rf /tmp/bridge-restore
+sudo mkdir -p /tmp/bridge-restore
+sudo tar -xzf /home/oc/feishu-opencode-bridge/backups/bridge-YYYYmmdd-HHMMSS.tar.gz \
   -C /tmp/bridge-restore
-cp /tmp/bridge-restore/bridge.db /home/oc/feishu-opencode-bridge/bridge.db
-cp /tmp/bridge-restore/bridge.env /home/oc/feishu-opencode-bridge/bridge.env
-chmod 600 /home/oc/feishu-opencode-bridge/bridge.env
+sudo chown -R oc:oc /tmp/bridge-restore
+sudo -u oc cp /tmp/bridge-restore/bridge.db /home/oc/feishu-opencode-bridge/bridge.db
+sudo -u oc cp /tmp/bridge-restore/bridge.env /home/oc/feishu-opencode-bridge/bridge.env
+sudo chmod 600 /home/oc/feishu-opencode-bridge/bridge.env
 sudo systemctl start feishu-opencode-bridge
 ```
 
@@ -257,7 +392,7 @@ sudo systemctl start feishu-opencode-bridge
   - 必须在卡片回调响应里返回 `card: {"type": "raw", "data": <card>}`。
   - 回调处理期间单独调用 `PATCH /im/v1/messages/{id}` 会被忽略。
 - **OpenCode 401**
-  - 检查 `bridge.env` 的 `OPENCODE_PASSWORD` 与 `/home/oc/.config/opencode/service.json` 的 `password` 是否一致。
+  - 检查 `bridge.env` 的 `OPENCODE_PASSWORD`、`service.env` 的 `OPENCODE_SERVER_PASSWORD`、`service.json` 的 `password` 三者是否一致。
 - **任务卡在“执行中”**
   - 后台每 60 秒会对账一次，OpenCode 已空闲时会自动补发结果或标记失败。
   - 超过 60 分钟仍未完成会自动中止并通知。
