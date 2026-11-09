@@ -10,7 +10,10 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from app import config as config_module  # noqa: E402
+try:
+    from app import config as config_module  # noqa: E402
+except ImportError:  # flattened workspace without app/ package
+    import config as config_module  # noqa: E402
 
 
 BASE_ENV = {
