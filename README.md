@@ -65,6 +65,7 @@ tail -f /home/oc/feishu-opencode-bridge/bridge.log
 - `/stop [序号|session_id]`：中止任务，默认当前会话；并清理该会话的待审批
 - `/whoami`：显示 open_id / chat_id / session_id / 会话标题 / 当前模型
 - 直接发送文本：在当前会话派任务
+- 当前没有会话时（例如刚执行 `/temp end`），直接发送文本会自动创建普通会话，标题取消息前 40 个字符
 
 ## 多会话并行
 

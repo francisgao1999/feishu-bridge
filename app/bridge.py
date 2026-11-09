@@ -2426,7 +2426,9 @@ class Bridge:
     ) -> int | None:
         if session_id is None:
             try:
-                session_id = await self._ensure_session(chat_id, open_id)
+                session_id = await self._ensure_session(
+                    chat_id, open_id, _short(text, 40) if text else None
+                )
             except Exception as exc:
                 log.exception("ensure session failed")
                 await self.feishu.send_text_async(
@@ -2513,12 +2515,14 @@ class Bridge:
         )
         return task_id
 
-    async def _ensure_session(self, chat_id: str, open_id: str) -> str:
+    async def _ensure_session(
+        self, chat_id: str, open_id: str, title: str | None = None
+    ) -> str:
         chat = self.db.get_chat(chat_id)
         if chat and chat["session_id"]:
             self._session_ids.add(chat["session_id"])
             return chat["session_id"]
-        return await self._create_session(chat_id, open_id, None)
+        return await self._create_session(chat_id, open_id, title)
 
     async def _create_session(
         self,
