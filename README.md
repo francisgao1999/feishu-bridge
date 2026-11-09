@@ -27,6 +27,10 @@
 │   ├── feishu-opencode-bridge.service
 │   ├── feishu-opencode-bridge-backup.service
 │   └── feishu-opencode-bridge-backup.timer
+├── debug/               # 独立调试脚本（不属于运行代码）
+│   ├── probe.py
+│   ├── card_probe.py
+│   └── README.md
 ├── backup.sh            # 备份脚本
 ├── requirements.txt     # Python 依赖
 ├── bridge.env.example   # 环境变量示例
@@ -158,6 +162,27 @@ sudo systemctl start feishu-opencode-bridge
 ```
 
 数据库结构由 `db.init()` 在启动时自动创建/迁移；升级前仍建议先备份。
+
+## 调试工具
+
+`debug/` 下是独立调试脚本，不参与桥接器运行：
+
+- `debug/probe.py`：验证飞书长连接和 `im.message.receive_v1` 事件订阅，打印原始消息事件。
+- `debug/card_probe.py`：向 `FEISHU_TEST_CHAT_ID` 发送测试审批卡，打印原始 `CARD` 帧和按钮回调；仅用于调试，生产环境使用 `app/ws_patch.py`。
+
+凭据从环境变量读取，不要硬编码：
+
+```bash
+cd /home/oc/feishu-opencode-bridge
+set -a
+source bridge.env
+set +a
+export FEISHU_TEST_CHAT_ID=oc_xxx
+.venv/bin/python debug/probe.py
+.venv/bin/python debug/card_probe.py
+```
+
+详细说明见 [`debug/README.md`](debug/README.md)。
 
 ## 服务
 
@@ -411,6 +436,7 @@ sudo systemctl start feishu-opencode-bridge
 
 - 只允许白名单 `open_id`，只处理私聊（p2p）。
 - 日志不记录 App Secret / API Key。
+- `debug/` 下的脚本从环境变量读取凭据，不硬编码密钥；不要把 `bridge.env`、`service.env` 或真实密钥提交到 Git。
 - `bridge.env`、`service.env` 权限 600。
 - OpenCode 只监听 `127.0.0.1`，使用 Basic 认证。
 - 审批只允许一次，不写入“总是允许”规则。
