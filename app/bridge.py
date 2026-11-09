@@ -30,6 +30,7 @@ from cards import (
     progress_card,
     reminder_card,
     schedule_help_text,
+    sessions_card,
     status_card,
     switch_card,
 )
@@ -1067,25 +1068,19 @@ class Bridge:
     async def _cmd_sessions(self, chat_id: str) -> None:
         sessions, active_id = self._list_sessions_with_current(chat_id)
         if not sessions:
-            await self.feishu.send_text_async(
-                chat_id, "当前没有会话。发送任意文本或 /new 创建。"
+            await self.feishu.send_card_async(
+                chat_id,
+                sessions_card(
+                    sessions=[],
+                    active_id=None,
+                    active_title=None,
+                ),
             )
             return
 
         pending = self.db.list_pending_permissions()
-        lines = [f"会话列表（共 {len(sessions)} 个）"]
-        if active_id:
-            active_title = next(
-                (
-                    session.get("title")
-                    for session in sessions
-                    if session["session_id"] == active_id
-                ),
-                None,
-            )
-            lines.append(f"当前会话：{active_title or '(无标题)'}")
-            lines.append(f"{active_id}")
-            lines.append("")
+        items: list[dict[str, Any]] = []
+        active_title: str | None = None
         for index, session in enumerate(sessions, 1):
             session_id = session["session_id"]
             active_task = self.db.get_active_task(session_id)
@@ -1095,8 +1090,6 @@ class Bridge:
                 if item["session_id"] == session_id
             )
             flags: list[str] = []
-            if session_id == active_id:
-                flags.append("当前")
             if session.get("temporary"):
                 flags.append("临时")
                 expires_at = session.get("expires_at")
@@ -1109,18 +1102,29 @@ class Bridge:
             if pending_count:
                 flags.append(f"待审批 {pending_count}")
             title = session.get("title") or "(无标题)"
+            if session_id == active_id:
+                active_title = title
             updated = datetime.fromtimestamp(
                 session["updated_at"]
             ).strftime("%m-%d %H:%M")
-            lines.append(
-                f"{index}. {title}  [{' / '.join(flags)}]  {updated}"
+            items.append(
+                {
+                    "index": index,
+                    "session_id": session_id,
+                    "title": title,
+                    "flags": flags,
+                    "updated": updated,
+                    "active": session_id == active_id,
+                }
             )
-            lines.append(f"   {session_id}")
-        lines.append("")
-        lines.append("发送 /switch 序号 或 /switch session_id 切换。")
-        lines.append("发送 /delete 序号 删除空闲会话，/clean 清理全部空闲会话。")
-        lines.append("发送 /temp 创建临时会话，/temp end 结束并删除临时目录。")
-        await self.feishu.send_text_async(chat_id, "\n".join(lines))
+        await self.feishu.send_card_async(
+            chat_id,
+            sessions_card(
+                sessions=items,
+                active_id=active_id,
+                active_title=active_title,
+            ),
+        )
 
     def _resolve_session(
         self, chat_id: str, argument: str

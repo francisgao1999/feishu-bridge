@@ -9,6 +9,12 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + f"\n\n…（已截断，共 {len(text)} 字符）"
 
 
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def _plain(text: str, limit: int = 2000) -> dict[str, Any]:
     return {
         "tag": "div",
@@ -255,6 +261,62 @@ def status_card(
             "template": "blue",
         },
         "elements": [_md("\n".join(lines)), _note(footer)],
+    }
+
+
+def sessions_card(
+    *,
+    sessions: list[dict[str, Any]],
+    active_id: str | None,
+    active_title: str | None,
+) -> dict[str, Any]:
+    elements: list[dict[str, Any]] = []
+    if active_id:
+        elements.append(
+            _md(
+                "**当前会话**\n"
+                f"{_clip(active_title or '(无标题)', 80)}\n"
+                f"`{active_id}`"
+            )
+        )
+        elements.append({"tag": "hr"})
+
+    if not sessions:
+        elements.append(
+            _md("当前没有会话。发送任意文本或 /new 创建。")
+        )
+    else:
+        for index, session in enumerate(sessions):
+            if index:
+                elements.append({"tag": "hr"})
+            title = _clip(session.get("title") or "(无标题)", 80)
+            marker = " `当前`" if session.get("active") else ""
+            lines = [f"**{session['index']}. {title}**{marker}"]
+            flags = session.get("flags") or []
+            if flags:
+                lines.append(" · ".join(flags))
+            lines.append(f"`{session['session_id']}`")
+            updated = session.get("updated")
+            if updated:
+                lines.append(f"更新于 {updated}")
+            elements.append(_md("\n".join(lines)))
+
+    elements.append(
+        _note(
+            "/switch 序号 切换 · /delete 序号 删除空闲会话 · "
+            "/clean 清理全部空闲会话 · /temp 创建临时会话"
+        )
+    )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": f"会话列表 · 共 {len(sessions)} 个",
+            },
+            "template": "blue",
+        },
+        "elements": elements,
     }
 
 
