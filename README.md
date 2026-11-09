@@ -64,9 +64,10 @@
 3. 事件订阅选择「使用长连接接收事件」，订阅 `im.message.receive_v1`。
 4. 卡片回调选择「使用长连接接收回调」，订阅 `card.action.trigger`。
 5. 按需申请权限：接收单聊消息、以应用身份发消息、更新消息卡片等。
-6. 发布应用。
+6. 如需多人使用，在「应用发布 → 版本管理与发布」创建版本时设置可用范围（全员或指定成员/部门）；可用范围决定谁能搜到并私聊应用。
+7. 发布应用。
 
-不需要公网 IP、回调地址或内网穿透。`FEISHU_ALLOWED_OPEN_IDS` 留空表示不限制；建议部署后先发送 `/whoami` 获取自己的 `open_id`，再填入白名单并重启。
+不需要公网 IP、回调地址或内网穿透。`FEISHU_ALLOWED_OPEN_IDS` 留空表示不限制；建议部署后先发送 `/whoami` 获取自己的 `open_id`，再填入白名单并重启。多人共用的配置和边界见「[多人共用同一个机器人](#多人共用同一个机器人)」。
 
 ### 3. OpenCode 服务
 
@@ -173,17 +174,62 @@ journalctl -u feishu-opencode-bridge@$USER -f
 
 在飞书私聊机器人发送 `/help`，再发送 `/status`；能收到回复即部署成功。日志开头会打印 `bridge home=... data=...`，可用来确认实际路径。
 
-### 8. 升级
+### 8. 更新与同步
 
-服务器目录已经是 Git 仓库，以运行用户拉取即可：
+推荐流程：**本地开发 → 推送到 GitHub → 生产服务器拉取**。生产服务器只做部署，不直接改代码；确需热修复时，在服务器提交并推回 GitHub，再让本地拉取。
+
+#### 8.1 本地 → GitHub
+
+在开发机的仓库根目录：
+
+```bash
+git status
+git diff
+python3 -m unittest discover -s tests -t . -v
+python3 -m compileall -q app debug tests
+bash -n backup.sh
+
+git add -A
+git commit -m "feat: ..."
+git push origin main
+```
+
+如果本地还没有仓库：
+
+```bash
+git clone https://github.com/francisgao1999/feishu-bridge.git
+cd feishu-bridge
+```
+
+#### 8.2 GitHub → 生产服务器
+
+以运行用户登录服务器（默认安装目录 `$HOME/feishu-opencode-bridge`）：
 
 ```bash
 cd "$HOME/feishu-opencode-bridge"
+
+# 1. 先备份数据库和 bridge.env
 ./backup.sh
+
+# 2. 确认工作区干净，避免覆盖服务器上的临时修改
+git status --short
+git log -1 --oneline
+
+# 3. 拉取最新代码（只允许快进，避免产生合并提交）
 git pull --ff-only
+
+# 4. 依赖有变化时更新（每次都执行也安全）
 .venv/bin/pip install -r requirements.txt
+
+# 5. 重启桥接器
 sudo systemctl restart feishu-opencode-bridge@$USER
+
+# 6. 验证
+sudo systemctl status feishu-opencode-bridge@$USER --no-pager
+sudo journalctl -u feishu-opencode-bridge@$USER -n 50 --no-pager
 ```
+
+然后在飞书私聊发送 `/status`，确认机器人正常回复。
 
 如果服务器直连 GitHub 较慢，先加载 OpenCode 的代理环境再拉取：
 
@@ -195,7 +241,78 @@ export https_proxy="$HTTPS_PROXY" http_proxy="$HTTP_PROXY"
 git pull --ff-only
 ```
 
-数据库结构由 `db.init()` 在启动时自动创建/迁移；升级前仍建议先备份。
+如果 `git pull --ff-only` 提示本地有修改或分支已分叉，不要直接 `git reset --hard`。先看 `git status` 和 `git log --oneline --graph --decorate -10`，确认服务器上的修改是否需要保留；需要保留就先提交并推送，不需要再处理。
+
+#### 8.3 生产服务器 → GitHub（热修复）
+
+不建议直接在服务器改代码。如果确实需要紧急修复：
+
+```bash
+cd "$HOME/feishu-opencode-bridge"
+git status
+git diff
+
+# 修改并验证后
+git add -A
+git commit -m "hotfix: ..."
+git push origin main
+```
+
+如果服务器没有配置 Git 身份，先设置：
+
+```bash
+git config user.name "oc-bot"
+git config user.email "oc-bot@example.com"
+```
+
+如果 `git push` 提示认证，用户名填 GitHub 用户名，密码填 Personal Access Token（GitHub 已不支持账号密码推送）。推送后回到开发机执行 `git pull --ff-only`，保持两边一致。
+
+#### 8.4 回滚
+
+推荐用 `git revert` 生成反向提交，保留历史。在开发机执行：
+
+```bash
+git log --oneline -10
+git revert <bad-commit>
+git push origin main
+```
+
+然后在生产服务器按 8.2 的步骤拉取、安装依赖并重启。
+
+紧急情况下也可以在服务器临时切到上一个可用提交：
+
+```bash
+cd "$HOME/feishu-opencode-bridge"
+git log --oneline -10
+git checkout <good-commit>
+sudo systemctl restart feishu-opencode-bridge@$USER
+```
+
+确认修复后切回 `main` 并拉取最新代码：
+
+```bash
+git checkout main
+git pull --ff-only
+sudo systemctl restart feishu-opencode-bridge@$USER
+```
+
+数据库回滚：先停服务，按「[备份与恢复](#备份与恢复)」恢复 `bridge.db`，再启动。数据库结构由 `db.init()` 在启动时自动创建/迁移；升级前仍建议先备份。
+
+#### 8.5 同步检查
+
+两边版本应一致：
+
+```bash
+# 开发机
+git log -1 --oneline
+
+# 生产服务器
+cd "$HOME/feishu-opencode-bridge"
+git log -1 --oneline
+git status --short
+```
+
+`git status --short` 没有输出表示服务器工作区干净；如果有输出，说明服务器上有未提交的修改，先确认来源再拉取。
 
 ## 测试
 
@@ -278,6 +395,56 @@ tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 - 进度卡、审批卡、结果卡都按 `session_id` 路由，不会串到别的会话。
 - 模型按会话保存；`/model` 只修改当前会话，`/new` 创建的新会话继承当前会话的模型。
 - 历史会话会自动迁移到 `sessions` 表，升级后可以直接 `/sessions` 看到并切换。
+
+## 多人共用同一个机器人
+
+一个飞书自建应用（一个 `oc-bot`）可以让企业内多个人同时私聊使用，桥接器没有“单用户”限制。是否放行由两层控制：
+
+1. **飞书应用可用范围**：开放平台 → 应用发布 → 版本管理与发布 → 创建版本时设置可用范围（全员或指定成员/部门），然后发布（企业管理员审核后生效）。不在可用范围内的人搜不到应用，也无法私聊。
+2. **`FEISHU_ALLOWED_OPEN_IDS` 白名单**：留空表示不限制（租户内所有能用该应用的人都可以用）；非空时只有列出的 `open_id` 能收到回复，其他人发消息会被拒绝并记录日志。
+
+放行新成员：
+
+```bash
+# 1. 让对方先给机器人发一条消息
+# 2. 在服务器上查日志拿 open_id
+grep "rejected message" ~/feishu-opencode-bridge/bridge.log | tail
+
+# 3. 编辑 bridge.env，逗号分隔追加
+FEISHU_ALLOWED_OPEN_IDS=ou_xxx,ou_yyy
+
+# 4. 重启桥接器（实例名 = 运行用户）
+sudo systemctl restart feishu-opencode-bridge@$USER
+```
+
+也可以让对方发送 `/whoami` 查看自己的 `open_id`，但需要先把对方加入白名单，或临时留空白名单。
+
+### 隔离范围
+
+- **按私聊隔离**：每个私聊有独立的 `chat_id`；会话、任务、审批、定时任务、模型选择都按 `chat_id` 保存。`/sessions`、`/switch`、`/last`、`/delete`、`/clean`、`/stop`、`/schedule`、`/status`、`/model`、`/temp` 都只能操作自己聊天里的数据，不能通过 session_id 访问别人的会话。
+- **只支持私聊**：群聊里的消息（包括 @机器人）会被忽略，机器人不会在群里回复。
+- **共享资源**：所有用户共用同一个桥接器进程、同一个 OpenCode 服务、同一个 `OPENCODE_DIRECTORY` 工作目录、同一个系统用户、同一套 agent/MCP 配置和同一套 API Key/额度。
+- **并发**：不同私聊的任务可以并行；同一会话同一时间只允许一个任务。多人同时跑重任务时，CPU、内存、模型额度会互相影响。
+
+### 边界情况
+
+- **不是多租户隔离**：所有用户的 agent 都能读写同一个工作目录，也能执行 shell 命令。A 用户可以让 agent 查看/修改 B 用户会话产生的文件，甚至执行 `git reset --hard` 影响所有人的工作区；`/temp` 只是空工作目录，不是沙箱，仍可能访问目录外文件。只应把机器人开放给信任的人。
+- **审批权限按白名单校验，不按任务归属校验**：审批卡只会发到发起任务的私聊，但回调只检查点击者是否在白名单内，不检查点击者是否属于该审批所在聊天。不要把审批卡转发给其他白名单用户，否则对方可以替你点「允许」。
+- **模型卡按会话校验**：模型切换会校验卡片所属会话，不能通过转发修改别人会话的模型。
+- **白名单变更需要重启**：`FEISHU_ALLOWED_OPEN_IDS` 只在启动时读取，改完必须重启桥接器；飞书可用范围变更需要重新发布版本。
+- **移除白名单不会停止已有任务和定时任务**：白名单只拦截新的入站消息。已经在跑的任务会继续执行并把结果发到原聊天；已创建的定时任务到点仍会执行。移除前先 `/stop` 并清理该用户的定时任务。
+- **移除白名单后无法再审批**：该用户点击审批卡会被拒绝，正在等待审批的任务会在 30 分钟后自动拒绝并中止。
+- **重新加入白名单会恢复原有数据**：历史会话、任务和定时任务没有删除，重新加入后仍可访问。
+- **成员离开企业**：其 `open_id` 留在白名单里不会产生新的访问（对方已无法使用应用），但历史会话、定时任务和数据库记录会保留；定时任务发送失败会记录日志。建议离开前清理其定时任务和会话。
+- **未在白名单的人收不到任何回复**：对方可能以为机器人坏了；建议同时收紧飞书可用范围，或在应用说明里写明使用范围。
+- **日志和数据库包含 open_id/chat_id**：多人使用时这些标识会出现在 `bridge.log` 和 `bridge.db` 中，按内部数据管理。
+- **额度与密钥共享**：所有用户消耗同一个 OpenCode 服务配置的 API Key 和额度；一个用户的长任务或大输出会影响其他人。
+- **全局配置对所有人生效**：`BRIDGE_MAX_FINAL_CHARS`、`BRIDGE_TASK_TIMEOUT_SECONDS`、`OPENCODE_AGENT`、默认模型等不能按用户单独设置。
+- **审批超时**：10 分钟未处理发提醒，30 分钟自动拒绝并中止任务；提醒只发到任务发起人的私聊。
+- **桥接器或 OpenCode 重启影响所有人**：所有用户的未完成任务都会中断并收到通知；飞书接口限流也按应用计算，多人高频使用可能互相影响。
+- **只处理文本消息**：图片、文件、富文本等会收到「目前只支持文本消息」提示。
+
+需要真正的隔离时，给每个用户独立部署一套桥接器 + OpenCode，或使用独立系统用户/容器/VM，不要只依赖白名单。
 
 ## 临时会话
 
@@ -401,7 +568,7 @@ tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 
 - `$BRIDGE_HOME/bridge.env`（600，`BRIDGE_HOME` 默认是仓库根目录）
   - 飞书 App ID / Secret
-  - 白名单 open_id
+  - 白名单 open_id（逗号分隔；留空表示不限制，多人共用见「[多人共用同一个机器人](#多人共用同一个机器人)」）
   - OpenCode 地址、用户名、密码
   - 工作目录、agent、模型
   - 进度间隔、审批提醒/超时、任务对账/超时、结果截断长度
@@ -602,7 +769,8 @@ journalctl -u feishu-opencode-bridge@oc -n 50
 
 ## 安全
 
-- 只允许白名单 `open_id`，只处理私聊（p2p）。
+- 只允许白名单 `open_id`，只处理私聊（p2p）；白名单留空表示不限制，建议多人共用时显式配置。
+- 多人共用同一个机器人时不是多租户隔离：所有用户共享工作目录、OpenCode 服务和系统用户，详见「[多人共用同一个机器人](#多人共用同一个机器人)」。
 - 日志不记录 App Secret / API Key。
 - `debug/` 下的脚本从环境变量读取凭据，不硬编码密钥；不要把 `bridge.env`、`service.env` 或真实密钥提交到 Git。
 - `bridge.env`、`service.env` 权限 600。
