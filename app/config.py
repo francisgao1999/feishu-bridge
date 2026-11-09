@@ -2,6 +2,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+
+_APP_DIR = Path(__file__).resolve().parent
+if (_APP_DIR.parent / "app" / "config.py").is_file():
+    _DEFAULT_BRIDGE_HOME = _APP_DIR.parent
+else:
+    _DEFAULT_BRIDGE_HOME = _APP_DIR
 
 
 def _load_env_file(path: str) -> None:
@@ -36,8 +44,31 @@ def _env_int(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _bridge_home() -> Path:
+    raw = os.environ.get("BRIDGE_HOME")
+    return Path(raw).expanduser() if raw else _DEFAULT_BRIDGE_HOME
+
+
+def _data_dir(bridge_home: Path) -> Path:
+    raw = os.environ.get("BRIDGE_DATA_DIR")
+    value = Path(raw).expanduser() if raw else bridge_home
+    if not value.is_absolute():
+        value = bridge_home / value
+    return value
+
+
+def _path(name: str, default: Path, base: Path) -> str:
+    raw = os.environ.get(name)
+    value = Path(raw).expanduser() if raw else default
+    if not value.is_absolute():
+        value = base / value
+    return str(value)
+
+
 @dataclass(frozen=True)
 class Config:
+    bridge_home: str
+    data_dir: str
     feishu_app_id: str
     feishu_app_secret: str
     allowed_open_ids: frozenset[str]
@@ -63,10 +94,18 @@ class Config:
 
 
 def load_config() -> Config:
-    env_file = os.environ.get(
-        "BRIDGE_ENV_FILE", "/home/oc/feishu-opencode-bridge/bridge.env"
-    )
-    _load_env_file(env_file)
+    env_file = os.environ.get("BRIDGE_ENV_FILE")
+    if env_file:
+        env_file_path = Path(env_file).expanduser()
+        if not env_file_path.is_absolute():
+            env_file_path = _bridge_home() / env_file_path
+    else:
+        env_file_path = _bridge_home() / "bridge.env"
+    _load_env_file(str(env_file_path))
+
+    # BRIDGE_HOME / BRIDGE_DATA_DIR may also be set inside bridge.env.
+    bridge_home = _bridge_home()
+    data_dir = _data_dir(bridge_home)
 
     allowed = frozenset(
         item.strip()
@@ -75,18 +114,22 @@ def load_config() -> Config:
     )
 
     return Config(
+        bridge_home=str(bridge_home),
+        data_dir=str(data_dir),
         feishu_app_id=_env("FEISHU_APP_ID"),
         feishu_app_secret=_env("FEISHU_APP_SECRET"),
         allowed_open_ids=allowed,
         opencode_base_url=_env("OPENCODE_BASE_URL", "http://127.0.0.1:4096").rstrip("/"),
         opencode_username=_env("OPENCODE_USERNAME", "opencode"),
         opencode_password=_env("OPENCODE_PASSWORD"),
-        workspace_dir=_env("OPENCODE_DIRECTORY", "/home/oc/workspace"),
+        workspace_dir=_path(
+            "OPENCODE_DIRECTORY", bridge_home / "workspace", bridge_home
+        ),
         agent=_env("OPENCODE_AGENT", "build"),
-        model_provider=_env("OPENCODE_MODEL_PROVIDER", "systalyze"),
-        model_id=_env("OPENCODE_MODEL_ID", "deepseek-ai/DeepSeek-V4.1-Flash-1017"),
-        db_path=_env("BRIDGE_DB", "/home/oc/feishu-opencode-bridge/bridge.db"),
-        log_path=_env("BRIDGE_LOG", "/home/oc/feishu-opencode-bridge/bridge.log"),
+        model_provider=_env("OPENCODE_MODEL_PROVIDER", "opencode"),
+        model_id=_env("OPENCODE_MODEL_ID", "big-pickle"),
+        db_path=_path("BRIDGE_DB", data_dir / "bridge.db", data_dir),
+        log_path=_path("BRIDGE_LOG", data_dir / "bridge.log", data_dir),
         progress_min_interval=_env_int("BRIDGE_PROGRESS_MIN_INTERVAL", 20),
         permission_remind_seconds=_env_int("BRIDGE_PERMISSION_REMIND_SECONDS", 600),
         permission_expire_seconds=_env_int("BRIDGE_PERMISSION_EXPIRE_SECONDS", 1800),
@@ -100,8 +143,7 @@ def load_config() -> Config:
         temp_session_ttl_seconds=_env_int(
             "BRIDGE_TEMP_SESSION_TTL_SECONDS", 1800
         ),
-        temp_workspace_root=_env(
-            "BRIDGE_TEMP_WORKSPACE_ROOT",
-            "/home/oc/feishu-opencode-bridge/temp",
+        temp_workspace_root=_path(
+            "BRIDGE_TEMP_WORKSPACE_ROOT", data_dir / "temp", data_dir
         ),
     )

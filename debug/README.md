@@ -13,7 +13,7 @@
 可以临时从 `bridge.env` 导入：
 
 ```bash
-cd /home/oc/feishu-opencode-bridge
+cd /path/to/feishu-opencode-bridge
 set -a
 source bridge.env
 set +a

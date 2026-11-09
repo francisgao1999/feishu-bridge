@@ -11,11 +11,12 @@
 
 凭据从环境变量读取，不要硬编码到文件里：
 
+    cd /path/to/feishu-opencode-bridge
     set -a
-    source /home/oc/feishu-opencode-bridge/bridge.env
+    source bridge.env
     set +a
     export FEISHU_TEST_CHAT_ID=oc_xxx
-    /home/oc/feishu-opencode-bridge/.venv/bin/python debug/card_probe.py
+    .venv/bin/python debug/card_probe.py
 """
 
 from __future__ import annotations

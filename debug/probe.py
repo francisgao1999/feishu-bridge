@@ -5,10 +5,11 @@ WebSocket 长连接，以及 ``im.message.receive_v1`` 事件是否正常推送�
 
 凭据从环境变量读取，不要硬编码到文件里：
 
+    cd /path/to/feishu-opencode-bridge
     set -a
-    source /home/oc/feishu-opencode-bridge/bridge.env
+    source bridge.env
     set +a
-    /home/oc/feishu-opencode-bridge/.venv/bin/python debug/probe.py
+    .venv/bin/python debug/probe.py
 """
 
 from __future__ import annotations

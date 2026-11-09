@@ -1,0 +1,21 @@
+[Unit]
+Description=Feishu <-> OpenCode bridge (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=%h/feishu-opencode-bridge
+Environment=HOME=%h
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=%h/feishu-opencode-bridge/bridge.env
+ExecStart=%h/feishu-opencode-bridge/.venv/bin/python %h/feishu-opencode-bridge/app/main.py
+Restart=always
+RestartSec=5
+MemoryMax=384M
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

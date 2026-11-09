@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily backup of Feishu-OpenCode bridge data (%i)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=feishu-opencode-bridge-backup@%i.service
+
+[Install]
+WantedBy=timers.target

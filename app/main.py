@@ -42,6 +42,7 @@ def main() -> None:
     setup_logging(cfg.log_path)
     log = logging.getLogger("main")
     log.info("starting feishu-opencode bridge")
+    log.info("bridge home=%s data=%s", cfg.bridge_home, cfg.data_dir)
 
     db = Database(cfg.db_path)
     db.init()

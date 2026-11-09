@@ -1,8 +1,0 @@
-[Unit]
-Description=Backup Feishu-OpenCode bridge data
-
-[Service]
-Type=oneshot
-User=oc
-Group=oc
-ExecStart=/home/oc/feishu-opencode-bridge/backup.sh
