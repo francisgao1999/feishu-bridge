@@ -4,7 +4,7 @@
 
 ## 1. 项目概览
 
-飞书 ↔ OpenCode 桥接器：通过飞书长连接接收消息和卡片回调，调用本机 OpenCode V2 HTTP API 执行编码任务，并把进度、审批和结果发回飞书。
+飞书 ↔ OpenCode 桥接器：通过飞书长连接接收消息和卡片回调，调用本机 OpenCode V2 HTTP API 执行编码任务，并把进度、审批、提问和结果发回飞书。
 
 - 语言：Python 3.13
 - 主要依赖：`httpx`、`httpx-sse`、`lark-oapi`
@@ -20,6 +20,7 @@
 | `app/main.py` | 进程入口、事件循环、任务调度 |
 | `app/bridge.py` | 飞书消息与 OpenCode 任务桥接 |
 | `app/feishu.py` | 飞书 API / 长连接封装 |
+| `app/forms.py` | 提问表单卡构建与答案转换 |
 | `app/opencode.py` | OpenCode V2 API 客户端 |
 | `app/cards.py` | 飞书卡片构建与更新 |
 | `app/permissions.py` | 审批与只读 Agent 规则 |

@@ -2,7 +2,9 @@
 
 > 背景：本项目是单用户使用的飞书 → OpenCode 桥接器。以下优化按“减少 babysitting”排序，不追求多租户隔离。
 > 原则：先做最小可用版，观察 1–2 周后再决定是否上完整架构。
-> 更新时间：2026-11-10
+> 更新时间：2026-11-10（已按当前代码核实）
+>
+> 核实结论：P0 中「任务失败/超时/重启中断通知」「AGENTS.md」「同一 session 串行、不同 session 并行」已完成；其余仍待做。部分完成项已在下方标注。
 
 ## 优先级总览
 
@@ -21,10 +23,12 @@
 | P3 | 治理：恢复演练 + 依赖固定 + prompt injection 加固 | 2–3 天 | 长期可靠性 |
 | P3 | 记忆：冲突/遗忘/加密/统计 | 2–3 天 | 记忆治理 |
 
+> 当前状态：已完成「任务失败/超时/重启中断通知」「AGENTS.md」「同一 session 串行、不同 session 并行」；其余未完成或仅部分完成。
+
 ## 1. 治理（最高优先级）
 
 ### P0
-- [ ] 补全 OpenCode permissions：
+- [ ] 补全 OpenCode permissions（当前仅配置 shell 危险命令 ask、edit/read 规则；MCP/webfetch/websearch/subagent/skill/external_directory 尚未配置）：
   - [ ] MCP 工具按 `<server>_<tool>` 设置 allow/ask/deny
   - [ ] `webfetch` 域名白名单，未知域名 ask
   - [ ] `websearch` allow
@@ -35,7 +39,7 @@
 - [ ] 审批回调校验 `permission.chat_id == 点击者 chat_id`
 - [ ] 日志/卡片/记忆写入前做 secret 脱敏
 - [ ] 高风险操作禁止 `always`
-- [ ] 评估用 `policies` 硬拒绝 `sudo`、`rm -rf /`、生产数据库写操作
+- [ ] 评估用 `policies` 硬拒绝 `sudo`、`rm -rf /`、生产数据库写操作（已有 `DANGEROUS_SHELL_PATTERNS` 尽力而为黑名单，但不是 OpenCode policies 硬拒绝）
 
 ### P1
 - [ ] `audit_log` 表：tool call、permission、task/job 生命周期
@@ -49,27 +53,27 @@
 - [ ] 健康检查：OpenCode、Feishu、SQLite、磁盘
 - [ ] 告警卡片 + 冷却时间
 - [ ] `/pause` / `/resume` kill switch
-- [ ] 优雅退出 + 启动恢复
+- [ ] 优雅退出 + 启动恢复（`shutdown()` 已优雅退出；启动仍 `mark_stale_tasks` 标记失败，未恢复）
 - [ ] 配置自检（必需 env、路径、连通性）
 
 ### P3
 - [ ] `restore.sh --check` 备份恢复演练
-- [ ] 依赖版本固定（requirements、OpenCode、MCP server）
+- [ ] 依赖版本固定（requirements 已固定 Python 依赖；OpenCode、MCP server 版本未固定）
 - [ ] prompt injection 防线：研究用只读 agent，执行前审批
 - [ ] 每日摘要：任务数、审批数、失败数、花费
 
 ## 2. 常驻（后台工作台）
 
 ### P0
-- [ ] `BRIDGE_TASK_TIMEOUT_SECONDS` 改为可按任务配置，或默认取消 60 分钟硬超时
-- [ ] 重启恢复：不要无脑 `mark_stale_tasks`；检查 OpenCode active/idle，能恢复就恢复
-- [ ] 任务失败/超时/重启中断时发送明确通知
-- [ ] 瞬时错误重试（指数退避）
+- [ ] `BRIDGE_TASK_TIMEOUT_SECONDS` 改为可按任务配置，或默认取消 60 分钟硬超时（当前为全局配置，默认 60 分钟硬超时）
+- [ ] 重启恢复：不要无脑 `mark_stale_tasks`；检查 OpenCode active/idle，能恢复就恢复（当前仍是无脑标记失败）
+- [x] 任务失败/超时/重启中断时发送明确通知（`_finish_task_failure` / `_finish_task_interrupted` / `notify_stale_tasks`）
+- [ ] 瞬时错误重试（指数退避）（SSE 已指数退避；飞书为线性重试；OpenCode 请求无重试）
 
 ### P1
 - [ ] `jobs` 表：kind、status、priority、attempts、lease、deadline、idempotency_key
 - [ ] worker pool + 租约 + 全局并发（`BRIDGE_MAX_CONCURRENT_JOBS`）
-- [ ] 同一 session 串行，不同 session 并行
+- [x] 同一 session 串行，不同 session 并行（已通过 `tasks` + `get_active_task` 实现，未引入 jobs 表）
 - [ ] `/jobs`、`/job <id>`、`/cancel <id>`、`/retry <id>`
 - [ ] 死信队列 + 通知
 - [ ] 保留 `tasks` 作为执行记录，`jobs` 作为调度状态
@@ -91,10 +95,10 @@
 ## 3. 记忆（跨会话连续性）
 
 ### P0
-- [ ] `AGENTS.md`：项目约定、部署命令、代码风格
+- [x] `AGENTS.md`：项目约定、部署命令、代码风格
 - [ ] `MEMORY.md`：用户偏好、长期事实、决策
 - [ ] `/remember <text>` 追加到 `MEMORY.md`
-- [ ] 新会话/新任务注入 `AGENTS.md` + `MEMORY.md` 的相关内容
+- [ ] 新会话/新任务注入 `AGENTS.md` + `MEMORY.md` 的相关内容（OpenCode 会自动加载项目 `AGENTS.md`；`MEMORY.md` 和桥接器注入尚未实现）
 - [ ] 控制注入 token 预算（<3k）
 
 ### P1
@@ -139,11 +143,11 @@
 - [ ] 日志/卡片/记忆里没有明文 token
 
 ### 常驻
-- [ ] 2 小时任务期间可以继续聊天，完成后通知
+- [x] 2 小时任务期间可以继续聊天，完成后通知（同一聊天可执行 `/status` 等命令，不同聊天可并行任务；结果卡会通知）
 - [ ] 重启 bridge 后任务不丢
 - [ ] goal 到点自动跑，结果去重
 - [ ] agent 能自己排后续任务
-- [ ] 失败任务有重试/死信/通知
+- [ ] 失败任务有重试/死信/通知（通知已实现；重试/死信未实现）
 
 ### 记忆
 - [ ] 新会话能答“上次部署怎么做的”
@@ -153,11 +157,13 @@
 
 ## 6. 暂不做
 
-- [ ] 多租户隔离 / 每用户容器（单用户，暂不需要）
-- [ ] 完整向量数据库（先用 FTS5 + 静态 MEMORY.md）
-- [ ] 复杂 goals/watches（除非确实需要主动发现）
-- [ ] 企业级 RBAC / Agent 365 集成
-- [ ] 自动学习/微调
+以下事项明确不在当前规划内，保留为记录：
+
+- 多租户隔离 / 每用户容器（单用户，暂不需要）
+- 完整向量数据库（先用 FTS5 + 静态 MEMORY.md）
+- 复杂 goals/watches（除非确实需要主动发现）
+- 企业级 RBAC / Agent 365 集成
+- 自动学习/微调
 
 ## 7. 决策记录
 
