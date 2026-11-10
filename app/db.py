@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS chats (
     session_title TEXT,
     model_provider TEXT,
     model_id TEXT,
+    agent TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title TEXT,
     model_provider TEXT,
     model_id TEXT,
+    agent TEXT,
     temporary INTEGER NOT NULL DEFAULT 0,
     temp_dir TEXT,
     expires_at INTEGER,
@@ -130,10 +132,18 @@ class Database:
                 self._conn.execute(
                     "ALTER TABLE chats ADD COLUMN model_id TEXT"
                 )
+            if "agent" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE chats ADD COLUMN agent TEXT"
+                )
             session_columns = {
                 row["name"]
                 for row in self._conn.execute("PRAGMA table_info(sessions)")
             }
+            if "agent" not in session_columns:
+                self._conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN agent TEXT"
+                )
             if "temporary" not in session_columns:
                 self._conn.execute(
                     "ALTER TABLE sessions ADD COLUMN temporary INTEGER "
@@ -166,10 +176,10 @@ class Database:
             """
             INSERT OR IGNORE INTO sessions(
                 session_id, chat_id, open_id, title,
-                model_provider, model_id, created_at, updated_at
+                model_provider, model_id, agent, created_at, updated_at
             )
             SELECT session_id, chat_id, open_id, session_title,
-                   model_provider, model_id, created_at, updated_at
+                   model_provider, model_id, agent, created_at, updated_at
             FROM chats
             WHERE session_id IS NOT NULL
             """
@@ -191,7 +201,7 @@ class Database:
                 "SELECT prompt FROM tasks WHERE id=?", (row["first_id"],)
             ).fetchone()
             chat = self._conn.execute(
-                "SELECT open_id, model_provider, model_id FROM chats "
+                "SELECT open_id, model_provider, model_id, agent FROM chats "
                 "WHERE chat_id=?",
                 (row["chat_id"],),
             ).fetchone()
@@ -204,8 +214,8 @@ class Database:
                 """
                 INSERT OR IGNORE INTO sessions(
                     session_id, chat_id, open_id, title,
-                    model_provider, model_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    model_provider, model_id, agent, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["session_id"],
@@ -214,6 +224,7 @@ class Database:
                     title,
                     chat["model_provider"] if chat else None,
                     chat["model_id"] if chat else None,
+                    chat["agent"] if chat else None,
                     row["created_at"],
                     row["updated_at"],
                 ),
@@ -238,7 +249,7 @@ class Database:
             row = self._conn.execute(
                 """
                 SELECT session_id, chat_id, open_id, title AS session_title,
-                       model_provider, model_id
+                       model_provider, model_id, agent
                 FROM sessions WHERE session_id=?
                 """,
                 (session_id,),
@@ -310,6 +321,7 @@ class Database:
         title: str,
         provider_id: str | None = None,
         model_id: str | None = None,
+        agent: str | None = None,
         *,
         temporary: bool = False,
         temp_dir: str | None = None,
@@ -321,10 +333,10 @@ class Database:
                 """
                 INSERT INTO sessions(
                     session_id, chat_id, open_id, title,
-                    model_provider, model_id, temporary, temp_dir,
+                    model_provider, model_id, agent, temporary, temp_dir,
                     expires_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     chat_id=excluded.chat_id,
                     open_id=excluded.open_id,
@@ -335,6 +347,7 @@ class Database:
                     model_id=COALESCE(
                         excluded.model_id, sessions.model_id
                     ),
+                    agent=COALESCE(excluded.agent, sessions.agent),
                     temporary=excluded.temporary,
                     temp_dir=excluded.temp_dir,
                     expires_at=excluded.expires_at,
@@ -347,6 +360,7 @@ class Database:
                     title,
                     provider_id,
                     model_id,
+                    agent,
                     1 if temporary else 0,
                     temp_dir,
                     expires_at,
@@ -537,6 +551,30 @@ class Database:
                 WHERE chat_id=?
                 """,
                 (provider_id, model_id, now, chat_id),
+            )
+
+    def update_session_agent(self, session_id: str, agent: str) -> None:
+        now = int(time.time())
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET agent=?, updated_at=?
+                WHERE session_id=?
+                """,
+                (agent, now, session_id),
+            )
+
+    def update_chat_agent(self, chat_id: str, agent: str) -> None:
+        now = int(time.time())
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE chats
+                SET agent=?, updated_at=?
+                WHERE chat_id=?
+                """,
+                (agent, now, chat_id),
             )
 
     # ------------------------------------------------------------------

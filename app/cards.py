@@ -216,6 +216,7 @@ def status_card(
     active_task: dict[str, Any] | None,
     pending: list[dict[str, Any]],
     model: str,
+    agent: str,
     workspace: str,
     sessions: list[dict[str, Any]] | None = None,
     note: str | None = None,
@@ -224,6 +225,7 @@ def status_card(
         f"**会话**: `{session_id or '未创建'}`",
         f"**标题**: {session_title or '-'}",
         f"**模型**: `{model}`",
+        f"**Agent**: `{agent}`",
         f"**工作目录**: `{workspace}`",
     ]
     if active_task:
@@ -325,6 +327,7 @@ def switch_card(
     title: str,
     session_id: str,
     model: str,
+    agent: str,
     state: str,
     last_task: dict[str, Any] | None = None,
     empty_text: str | None = None,
@@ -334,6 +337,7 @@ def switch_card(
         _md(f"**会话**: {title}"),
         _md(f"**Session**: `{session_id}`"),
         _md(f"**模型**: `{model}`"),
+        _md(f"**Agent**: `{agent}`"),
         _md(f"**状态**: {state}"),
     ]
 
@@ -470,6 +474,101 @@ def model_resolved_card(
     }
 
 
+def agent_select_card(
+    *,
+    agents: list[dict[str, Any]],
+    current_agent: str,
+    session_id: str | None = None,
+    session_title: str | None = None,
+) -> dict[str, Any]:
+    current = next(
+        (agent for agent in agents if agent["id"] == current_agent), None
+    )
+    current_label = (
+        f"{current['name']} (`{current_agent}`)"
+        if current
+        else f"`{current_agent}`"
+    )
+    elements: list[dict[str, Any]] = [
+        _md(f"**当前 Agent**: {current_label}"),
+        {"tag": "hr"},
+    ]
+
+    actions: list[dict[str, Any]] = []
+    for agent in agents:
+        selected = agent["id"] == current_agent
+        label = agent["name"]
+        if selected:
+            label = f"✓ {label}"
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": label},
+                "type": "primary" if selected else "default",
+                "value": {
+                    "action": "agent",
+                    "agent_id": agent["id"],
+                    **(
+                        {"session_id": session_id}
+                        if session_id
+                        else {}
+                    ),
+                },
+            }
+        )
+    for start in range(0, len(actions), 4):
+        elements.append(
+            {
+                "tag": "action",
+                "actions": actions[start : start + 4],
+            }
+        )
+
+    descriptions = [
+        f"- `{agent['id']}` {agent['name']}：{_clip(agent['description'], 120)}"
+        for agent in agents
+        if agent.get("description")
+    ]
+    if descriptions:
+        elements.append({"tag": "hr"})
+        elements.append(_md("\n".join(descriptions)))
+
+    note = "点击按钮切换 Agent；切换后对该会话的新任务生效。"
+    if session_title:
+        note = f"会话：{session_title}\n{note}"
+    elements.append(_note(note))
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "选择 Agent"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
+def agent_resolved_card(
+    *,
+    agent_id: str,
+    agent_name: str,
+    session_label: str | None = None,
+) -> dict[str, Any]:
+    elements = [
+        _md(f"**当前 Agent**: {agent_name} (`{agent_id}`)"),
+    ]
+    if session_label:
+        elements.append(_md(f"**会话**: {session_label}"))
+    elements.append(_note("该会话的后续新任务将使用该 Agent。"))
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Agent 已切换"},
+            "template": "green",
+        },
+        "elements": elements,
+    }
+
+
 def reminder_card(
     *,
     prompt: str,
@@ -544,14 +643,17 @@ def help_text(temp_ttl_text: str = "空闲 30 分钟后自动清理") -> str:
         "/clean  列出空闲会话；/clean confirm 确认清理"
         "（不含当前会话；confirm 也可写 确认/yes/y；别名 /清理）\n"
         "/status  查看当前会话、全部会话、任务和审批状态\n"
-        "/whoami  显示 open_id / chat_id / session_id / 会话标题 / 模型\n"
+        "/whoami  显示 open_id / chat_id / session_id / 会话标题 / 模型 / Agent\n"
         "\n"
-        "【任务与模型】\n"
+        "【任务、模型与 Agent】\n"
         "直接发送文本  在当前会话派任务\n"
         "/stop [序号|session_id]  中止任务并清理待审批，默认当前会话\n"
         "/model  打开模型选择卡片\n"
         "/model <序号>  按列表序号切换模型\n"
         "/model <供应商>/<模型>  直接切换模型\n"
+        "/agent  打开 Agent 选择卡片\n"
+        "/agent <序号>  按列表序号切换 Agent\n"
+        "/agent <agent_id|名称>  直接切换 Agent，例如 /agent plan\n"
         "\n"
         "【定时任务】\n"
         "/schedule  查看定时任务用法（别名 /定时；也可 /schedule help）\n"

@@ -40,6 +40,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.db_path, str(REPO_ROOT / "bridge.db"))
         self.assertEqual(cfg.log_path, str(REPO_ROOT / "bridge.log"))
         self.assertEqual(cfg.temp_workspace_root, str(REPO_ROOT / "temp"))
+        self.assertEqual(cfg.agent, "build")
+        self.assertEqual(cfg.readonly_agents, frozenset({"plan"}))
         self.assertEqual(cfg.model_provider, "opencode")
         self.assertEqual(cfg.model_id, "big-pickle")
 
@@ -100,6 +102,14 @@ class ConfigTest(unittest.TestCase):
             )
             self.assertEqual(cfg.temp_workspace_root, str(home / "data" / "tmp"))
             self.assertEqual(cfg.workspace_dir, str(home / "work"))
+
+    def test_readonly_agents_override(self):
+        cfg = self.load(OPENCODE_READONLY_AGENTS="plan, reviewer")
+        self.assertEqual(
+            cfg.readonly_agents, frozenset({"plan", "reviewer"})
+        )
+        cfg = self.load(OPENCODE_READONLY_AGENTS="")
+        self.assertEqual(cfg.readonly_agents, frozenset())
 
     def test_env_file_is_loaded(self):
         with tempfile.TemporaryDirectory() as tmp:

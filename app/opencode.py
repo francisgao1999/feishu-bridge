@@ -124,6 +124,43 @@ def parse_model_catalog(
     return models
 
 
+def parse_agents(data: Any) -> list[dict[str, Any]]:
+    """Extract selectable primary agents from /api/agent.
+
+    Subagents and hidden maintenance agents are not selectable as the main
+    agent for a session, so they are filtered out.
+    """
+    items = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+
+    agents: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("hidden"):
+            continue
+        mode = item.get("mode")
+        if mode == "subagent":
+            continue
+        agent_id = item.get("id")
+        if not agent_id:
+            continue
+        permissions = item.get("permissions")
+        agents.append(
+            {
+                "id": str(agent_id),
+                "name": str(item.get("name") or agent_id),
+                "description": str(item.get("description") or ""),
+                "mode": str(mode or "primary"),
+                "permissions": permissions
+                if isinstance(permissions, list)
+                else [],
+            }
+        )
+    return agents
+
+
 class OpenCodeClient:
     def __init__(self, base_url: str, username: str, password: str):
         self._base_url = base_url.rstrip("/")
@@ -314,6 +351,42 @@ class OpenCodeClient:
             json={"model": {"providerID": provider_id, "id": model_id}},
         )
 
+    async def list_agents(
+        self, directory: str | None = None
+    ) -> list[dict[str, Any]]:
+        params: dict[str, str] | None = None
+        if directory:
+            params = {"location[directory]": directory}
+        try:
+            data = await self._request(
+                "GET", "/api/agent", params=params
+            )
+        except OpenCodeError as exc:
+            # A missing workspace directory makes the location lookup fail.
+            # Fall back to the server's default location so global agents
+            # (build, plan, ...) remain selectable.
+            if params and exc.status_code in (400, 404):
+                data = await self._request("GET", "/api/agent")
+            else:
+                raise
+        return parse_agents(data)
+
+    async def switch_agent(self, session_id: str, agent: str) -> None:
+        await self._request(
+            "POST",
+            f"/api/session/{session_id}/agent",
+            json={"agent": agent},
+        )
+
+    async def set_session_permissions(
+        self, session_id: str, permissions: list[dict[str, str]]
+    ) -> None:
+        await self._request(
+            "PATCH",
+            f"/api/session/{session_id}",
+            json={"permissions": permissions},
+        )
+
     async def list_pending_permissions(self) -> list[dict[str, Any]]:
         data = await self._request("GET", "/api/permission/request")
         if isinstance(data, dict):
@@ -376,5 +449,33 @@ class OpenCodeSyncClient:
         response = self._client.post(
             f"/api/session/{session_id}/model",
             json={"model": {"providerID": provider_id, "id": model_id}},
+        )
+        self._check(response)
+
+    def list_agents(
+        self, directory: str | None = None
+    ) -> list[dict[str, Any]]:
+        params: dict[str, str] | None = None
+        if directory:
+            params = {"location[directory]": directory}
+        response = self._client.get("/api/agent", params=params)
+        if params and response.status_code in (400, 404):
+            response = self._client.get("/api/agent")
+        self._check(response)
+        return parse_agents(response.json())
+
+    def switch_agent(self, session_id: str, agent: str) -> None:
+        response = self._client.post(
+            f"/api/session/{session_id}/agent",
+            json={"agent": agent},
+        )
+        self._check(response)
+
+    def set_session_permissions(
+        self, session_id: str, permissions: list[dict[str, str]]
+    ) -> None:
+        response = self._client.patch(
+            f"/api/session/{session_id}",
+            json={"permissions": permissions},
         )
         self._check(response)

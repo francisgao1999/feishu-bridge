@@ -37,6 +37,9 @@
 │   └── README.md
 ├── tests/               # 单元测试（unittest）
 │   ├── test_config.py
+│   ├── test_db.py
+│   ├── test_opencode.py
+│   ├── test_permissions.py
 │   └── test_backup.py
 ├── backup.sh            # 备份脚本
 ├── requirements.txt     # Python 依赖
@@ -322,7 +325,7 @@ python3 -m compileall -q app debug tests
 bash -n backup.sh
 ```
 
-测试覆盖 `app/config.py` 的默认路径、变量覆盖和 `bridge.env` 加载，以及 `backup.sh` 的默认/自定义路径、缺失数据库和备份权限。
+测试覆盖 `app/config.py` 的默认路径、变量覆盖、只读 Agent 配置和 `bridge.env` 加载，`app/opencode.py` 的 Agent 列表解析，`app/permissions.py` 的只读 Agent 检测和会话权限规则，`app/db.py` 的 Agent 字段迁移与读写，以及 `backup.sh` 的默认/自定义路径、缺失数据库和备份权限。
 
 ## 调试工具
 
@@ -371,17 +374,20 @@ tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 - `/temp end`（或 `/temp 结束`、`/temp stop`）：结束当前临时会话，删除 OpenCode 会话和临时工作目录，并清空当前会话
 - `/temp list`（或 `/temp 列表`）：查看临时会话、剩余时间和临时目录
 - `/sessions`（或 `/list`）：以卡片列出全部会话、运行状态、待审批数量；顶部固定显示当前会话，列表中用 `[当前]` 标记
-- `/switch <序号|session_id|标题>`（或 `/use`）：切换当前会话；同时显示目标会话的模型、上次任务的状态、完成时间和结果摘要
+- `/switch <序号|session_id|标题>`（或 `/use`）：切换当前会话；同时显示目标会话的模型、Agent、上次任务的状态、完成时间和结果摘要
 - `/last [序号|session_id]`（或 `/result`）：重发该会话最后一次任务结果，默认当前会话
 - `/delete <序号|session_id|标题>`（或 `/remove`、`/删除`）：删除一个空闲会话（当前会话不能删除）
 - `/clean`（或 `/清理`）：列出全部空闲会话；`/clean confirm` 确认清理（保留当前会话；confirm 也可写 `确认`/`yes`/`y`）
 - `/schedule`（或 `/定时`）：定时任务 / 单次提醒，详见下方「定时任务」
-- `/status`：查看当前会话、全部会话、当前任务、待审批、当前模型
+- `/status`：查看当前会话、全部会话、当前任务、待审批、当前模型和 Agent
 - `/model`：回复模型选择卡片，点击按钮切换
 - `/model <序号>`：按 `/model` 列表中的序号切换
 - `/model <供应商>/<模型>`：直接指定切换，例如 `/model systalyze/deepseek-ai/DeepSeek-V4-Pro-0813`
+- `/agent`：回复 Agent 选择卡片，点击按钮切换
+- `/agent <序号>`：按 `/agent` 列表中的序号切换
+- `/agent <agent_id|名称>`：直接指定切换，例如 `/agent plan`
 - `/stop [序号|session_id]`：中止任务，默认当前会话；并清理该会话的待审批
-- `/whoami`：显示 open_id / chat_id / session_id / 会话标题 / 当前模型
+- `/whoami`：显示 open_id / chat_id / session_id / 会话标题 / 当前模型 / 当前 Agent
 - 直接发送文本：在当前会话派任务
 - 当前没有会话时（例如刚执行 `/temp end`），直接发送文本会自动创建普通会话，标题取消息前 40 个字符
 
@@ -394,6 +400,7 @@ tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 - 每个会话同一时间只允许一个任务；不同会话可以并行执行。
 - 进度卡、审批卡、结果卡都按 `session_id` 路由，不会串到别的会话。
 - 模型按会话保存；`/model` 只修改当前会话，`/new` 创建的新会话继承当前会话的模型。
+- Agent 也按会话保存；`/agent` 只修改当前会话，`/new` 和 `/temp` 创建的新会话继承当前会话的 Agent。
 - 历史会话会自动迁移到 `sessions` 表，升级后可以直接 `/sessions` 看到并切换。
 
 ## 多人共用同一个机器人
@@ -421,7 +428,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 
 ### 隔离范围
 
-- **按私聊隔离**：每个私聊有独立的 `chat_id`；会话、任务、审批、定时任务、模型选择都按 `chat_id` 保存。`/sessions`、`/switch`、`/last`、`/delete`、`/clean`、`/stop`、`/schedule`、`/status`、`/model`、`/temp` 都只能操作自己聊天里的数据，不能通过 session_id 访问别人的会话。
+- **按私聊隔离**：每个私聊有独立的 `chat_id`；会话、任务、审批、定时任务、模型和 Agent 选择都按 `chat_id` 保存。`/sessions`、`/switch`、`/last`、`/delete`、`/clean`、`/stop`、`/schedule`、`/status`、`/model`、`/agent`、`/temp` 都只能操作自己聊天里的数据，不能通过 session_id 访问别人的会话。
 - **只支持私聊**：群聊里的消息（包括 @机器人）会被忽略，机器人不会在群里回复。
 - **共享资源**：所有用户共用同一个桥接器进程、同一个 OpenCode 服务、同一个 `OPENCODE_DIRECTORY` 工作目录、同一个系统用户、同一套 agent/MCP 配置和同一套 API Key/额度。
 - **并发**：不同私聊的任务可以并行；同一会话同一时间只允许一个任务。多人同时跑重任务时，CPU、内存、模型额度会互相影响。
@@ -430,7 +437,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 
 - **不是多租户隔离**：所有用户的 agent 都能读写同一个工作目录，也能执行 shell 命令。A 用户可以让 agent 查看/修改 B 用户会话产生的文件，甚至执行 `git reset --hard` 影响所有人的工作区；`/temp` 只是空工作目录，不是沙箱，仍可能访问目录外文件。只应把机器人开放给信任的人。
 - **审批权限按白名单校验，不按任务归属校验**：审批卡只会发到发起任务的私聊，但回调只检查点击者是否在白名单内，不检查点击者是否属于该审批所在聊天。不要把审批卡转发给其他白名单用户，否则对方可以替你点「允许」。
-- **模型卡按会话校验**：模型切换会校验卡片所属会话，不能通过转发修改别人会话的模型。
+- **模型卡和 Agent 卡按会话校验**：模型/Agent 切换会校验卡片所属会话，不能通过转发修改别人会话的模型或 Agent。
 - **白名单变更需要重启**：`FEISHU_ALLOWED_OPEN_IDS` 只在启动时读取，改完必须重启桥接器；飞书可用范围变更需要重新发布版本。
 - **移除白名单不会停止已有任务和定时任务**：白名单只拦截新的入站消息。已经在跑的任务会继续执行并把结果发到原聊天；已创建的定时任务到点仍会执行。移除前先 `/stop` 并清理该用户的定时任务。
 - **移除白名单后无法再审批**：该用户点击审批卡会被拒绝，正在等待审批的任务会在 30 分钟后自动拒绝并中止。
@@ -439,7 +446,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 - **未在白名单的人收不到任何回复**：对方可能以为机器人坏了；建议同时收紧飞书可用范围，或在应用说明里写明使用范围。
 - **日志和数据库包含 open_id/chat_id**：多人使用时这些标识会出现在 `bridge.log` 和 `bridge.db` 中，按内部数据管理。
 - **额度与密钥共享**：所有用户消耗同一个 OpenCode 服务配置的 API Key 和额度；一个用户的长任务或大输出会影响其他人。
-- **全局配置对所有人生效**：`BRIDGE_MAX_FINAL_CHARS`、`BRIDGE_TASK_TIMEOUT_SECONDS`、`OPENCODE_AGENT`、默认模型等不能按用户单独设置。
+- **全局配置对所有人生效**：`BRIDGE_MAX_FINAL_CHARS`、`BRIDGE_TASK_TIMEOUT_SECONDS`、`OPENCODE_AGENT`、`OPENCODE_READONLY_AGENTS`、默认模型等不能按用户单独设置。
 - **审批超时**：10 分钟未处理发提醒，30 分钟自动拒绝并中止任务；提醒只发到任务发起人的私聊。
 - **桥接器或 OpenCode 重启影响所有人**：所有用户的未完成任务都会中断并收到通知；飞书接口限流也按应用计算，多人高频使用可能互相影响。
 - **只处理文本消息**：图片、文件、富文本等会收到「目前只支持文本消息」提示。
@@ -456,6 +463,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 - `/temp end` 立即结束当前临时会话；`/temp list` 查看临时会话、剩余时间和目录。
 - `/sessions` 中临时会话带 `[临时]` 标记；`/switch` 进入临时会话会重置计时。
 - `/new` 创建普通会话并切换后，原临时会话继续倒计时，到期后静默删除。
+- 临时会话继承创建时当前会话的模型和 Agent；之后可以用 `/model`、`/agent` 单独切换。
 - `/delete` 非当前临时会话会同时删除目录；当前临时会话请用 `/temp end`。
 - `/clean` 会清理空闲临时会话及其目录。
 - 临时目录是工作目录，不是沙箱；agent 仍可能读写目录外文件。空目录意味着 agent 默认看不到项目文件，需要时请使用绝对路径。
@@ -536,6 +544,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 - 子命令也支持中文：列表/暂停/恢复/删除/执行/单次/一次性/添加；周期可写每天/每日、工作日、每周一。
 
 - 每个周期任务使用独立会话，标题为 `定时: <任务摘要>`；创建和执行都不会切换当前会话。
+- 定时任务创建会话时继承该聊天当前会话的模型和 Agent；之后修改当前会话不会影响已创建的定时任务会话。
 - 到点后复用普通任务链路：发进度卡 → 执行 → 在聊天底部发结果卡，因此会触发飞书消息通知。
 - 时区固定为 `Asia/Shanghai`；后台每 30 秒检查一次到期任务。
 - 服务重启后，错过执行时间 30 分钟内会补跑一次；超过 30 分钟则跳过本次并发送提示。
@@ -552,10 +561,23 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 - 卡片所属会话有任务执行时不允许切换，需先 `/stop` 或等待完成；其他会话在跑不影响切换。
 - 切换只影响后续请求，不会重跑已完成的任务。
 
+## Agent 切换
+
+- Agent 列表来自 OpenCode V2 的 `GET /api/agent`，自动包含 `build`、`plan` 以及 `opencode.jsonc` 中自定义的 `primary` / `all` agent；`subagent` 和隐藏的维护 agent（`compaction`、`title`、`summary` 等）不会出现在列表中。
+- 发送 `/agent` 后回复选择卡片，当前 Agent 带 ✓；也可以 `/agent <序号>`、`/agent <agent_id>` 或 `/agent <名称>` 直接切换，例如 `/agent plan`。
+- 点击按钮或直接切换会调用 `POST /api/session/{sessionID}/agent`，并把选择持久化到 SQLite `sessions.agent`（同时同步 `chats.agent`）。
+- 后续 `/new`、`/temp` 创建的新会话继承当前会话的 Agent；`/status`、`/whoami` 和 `/switch` 都会显示当前 Agent；未选择时回退 `bridge.env` 中的 `OPENCODE_AGENT`（默认 `build`）。
+- 卡片所属会话有任务执行时不允许切换，需先 `/stop` 或等待完成；其他会话在跑不影响切换。
+- 切换只影响后续请求，不会重跑已完成的任务。
+- 只读 Agent（指不注入会话级 `edit * ask`，让 Agent 自己的 `edit * deny` 生效）：`plan` 默认按只读处理（`OPENCODE_READONLY_AGENTS`，逗号分隔）。如果不省略这条规则，它会覆盖 plan 自己的 `edit * deny`，导致 plan 仍能通过 edit 工具改文件。桥接器也会读取 Agent 自身的 `permissions`，如果最后一条匹配 `edit *` 的规则是 `deny`，同样按只读处理。
+- Agent 列表按会话工作目录查询：普通会话用 `OPENCODE_DIRECTORY`，临时会话用其临时目录；目录查询失败时回退到全局列表。
+- 如果保存的 Agent 已不存在（例如自定义 agent 被删除），创建新会话时会回退到 `OPENCODE_AGENT`，再回退到列表中的第一个可用 Agent。
+- 需要 OpenCode V2 提供 `/api/agent`、`/api/session/{sessionID}/agent` 和 `PATCH /api/session/{sessionID}`；旧版本没有这些接口时 `/agent` 会提示获取列表失败，普通任务不受影响。
+
 ## 审批策略
 
 - 会话级规则：普通 `shell` 命令默认 `allow`；危险命令（`rm`、`sudo`、`dd`、`mkfs`、`systemctl` 启停、包管理器安装/卸载、`git push`/`reset --hard`、`docker rm` 等）`ask`。
-- `edit` 仍然全部 `ask`；`read` 匹配 `*.env`、`*.env.*` 也 `ask`，`*.env.example` 例外允许。
+- 普通 Agent 的 `edit` 仍然全部 `ask`；只读 Agent（默认 `plan`，可用 `OPENCODE_READONLY_AGENTS` 调整）不注入 `edit * ask`，让 Agent 自己的 `edit * deny` 生效。`read` 匹配 `*.env`、`*.env.*` 也 `ask`，`*.env.example` 例外允许。
 - 危险命令列表在 `app/permissions.py` 的 `DANGEROUS_SHELL_PATTERNS`，可自行增删。
 - 这是尽力而为的黑名单，不是安全边界；通过解释器或脚本（如 `python -c`、`bash script.sh`）仍可能绕过。需要更强隔离时，建议使用容器/VM 或改成白名单。
 - 审批卡片只有「允许一次」和「拒绝」，没有“总是批准”。
@@ -570,7 +592,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
   - 飞书 App ID / Secret
   - 白名单 open_id（逗号分隔；留空表示不限制，多人共用见「[多人共用同一个机器人](#多人共用同一个机器人)」）
   - OpenCode 地址、用户名、密码
-  - 工作目录、agent、模型
+  - 工作目录、默认 Agent `OPENCODE_AGENT`、只读 Agent `OPENCODE_READONLY_AGENTS`、模型
   - 进度间隔、审批提醒/超时、任务对账/超时、结果截断长度
   - 临时会话空闲时长 `BRIDGE_TEMP_SESSION_TTL_SECONDS`（默认 1800 秒）
   - 临时工作目录根路径 `BRIDGE_TEMP_WORKSPACE_ROOT`（默认 `$BRIDGE_DATA_DIR/temp`）
@@ -647,6 +669,14 @@ sudo systemctl start feishu-opencode-bridge@$USER
   - 回调处理期间单独调用 `PATCH /im/v1/messages/{id}` 会被忽略。
 - **OpenCode 401**
   - 检查 `bridge.env` 的 `OPENCODE_PASSWORD`、`service.env` 的 `OPENCODE_SERVER_PASSWORD`、`service.json` 的 `password` 三者是否一致。
+- **`/agent` 获取列表失败或看不到自定义 Agent**
+  - 确认 OpenCode 是 V2，且 `GET /api/agent` 可访问；旧版本没有该接口。
+  - 自定义 Agent 的 `mode` 需要是 `primary` 或 `all`；`subagent` 和 `hidden: true` 的 Agent 不会列出。
+  - 普通会话按 `OPENCODE_DIRECTORY` 查询 Agent，临时会话按临时目录查询；目录不存在时会回退到全局列表。
+  - 保存的 Agent 被删除后，新会话会自动回退到 `OPENCODE_AGENT` 或列表中的第一个 Agent。
+- **`plan` 仍然能通过 edit 工具修改文件**
+  - 确认 `OPENCODE_READONLY_AGENTS` 包含 `plan`（默认已包含），或该 Agent 自身最后一条 `edit *` 规则是 `deny`。
+  - 切换 Agent 只影响后续任务；切换前已提交的任务仍按原规则执行。
 - **任务卡在“执行中”**
   - 后台每 60 秒会对账一次，OpenCode 已空闲时会自动补发结果或标记失败。
   - 超过 60 分钟仍未完成会自动中止并通知。
@@ -764,6 +794,8 @@ journalctl -u feishu-opencode-bridge@oc -n 50
 ```
 
 旧版 `bridge.env` 可以继续使用；新变量都有默认值，不需要改。若旧版显式写了 `/home/oc/...` 路径也能正常工作。
+
+升级到支持 `/agent` 的版本后，`db.init()` 会自动给 `chats` / `sessions` 增加 `agent` 列，历史会话无需手动迁移；未设置过 Agent 的会话使用 `OPENCODE_AGENT`（默认 `build`）。`/agent` 依赖 OpenCode V2 的 `/api/agent` 和 `/api/session/{sessionID}/agent` 接口。
 
 如果旧版使用专用 `oc` 用户，迁移后继续用 `@oc` 实例即可，不需要改 unit 文件；如果改用普通用户，把实例名换成该用户名，并确保该用户对安装目录有读写权限。
 

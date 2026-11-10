@@ -77,6 +77,7 @@ class Config:
     opencode_password: str
     workspace_dir: str
     agent: str
+    readonly_agents: frozenset[str]
     model_provider: str
     model_id: str
     db_path: str
@@ -126,6 +127,13 @@ def load_config() -> Config:
             "OPENCODE_DIRECTORY", bridge_home / "workspace", bridge_home
         ),
         agent=_env("OPENCODE_AGENT", "build"),
+        readonly_agents=frozenset(
+            item.strip()
+            for item in _env(
+                "OPENCODE_READONLY_AGENTS", "plan"
+            ).split(",")
+            if item.strip()
+        ),
         model_provider=_env("OPENCODE_MODEL_PROVIDER", "opencode"),
         model_id=_env("OPENCODE_MODEL_ID", "big-pickle"),
         db_path=_path("BRIDGE_DB", data_dir / "bridge.db", data_dir),

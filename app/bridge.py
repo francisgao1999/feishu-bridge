@@ -22,6 +22,8 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from cards import (
+    agent_resolved_card,
+    agent_select_card,
     approval_card,
     approval_resolved_card,
     help_text,
@@ -575,6 +577,9 @@ class Bridge:
         self._started_at: dict[int, float] = {}
         self._stale_tasks: list[dict[str, Any]] = []
         self._model_catalog: list[dict[str, str]] = []
+        self._agent_catalog: list[dict[str, Any]] = []
+        self._agent_catalog_dir: str | None = None
+        self._agent_catalog_at: float = 0.0
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._clean_pending: dict[str, set[str]] = {}
         self._stopping = False
@@ -689,6 +694,47 @@ class Bridge:
         if chat and chat.get("model_provider") and chat.get("model_id"):
             return str(chat["model_provider"]), str(chat["model_id"])
         return self.cfg.model_provider, self.cfg.model_id
+
+    def _session_agent(
+        self,
+        chat: dict[str, Any] | None,
+        session_id: str | None = None,
+    ) -> str:
+        if session_id:
+            session = self.db.get_session(session_id)
+            if session and session.get("agent"):
+                return str(session["agent"])
+        if chat and chat.get("agent"):
+            return str(chat["agent"])
+        return self.cfg.agent
+
+    def _agent_directory(
+        self,
+        chat: dict[str, Any] | None,
+        session_id: str | None = None,
+    ) -> str:
+        if session_id:
+            session = self.db.get_session(session_id)
+            if session and session.get("temporary") and session.get("temp_dir"):
+                return str(session["temp_dir"])
+        return self.cfg.workspace_dir
+
+    async def _get_agents(
+        self, directory: str, *, refresh: bool = False
+    ) -> list[dict[str, Any]]:
+        now = time.time()
+        if (
+            not refresh
+            and self._agent_catalog
+            and self._agent_catalog_dir == directory
+            and now - self._agent_catalog_at < 60
+        ):
+            return self._agent_catalog
+        agents = await self.oc.list_agents(directory)
+        self._agent_catalog = agents
+        self._agent_catalog_dir = directory
+        self._agent_catalog_at = now
+        return agents
 
     def _extract_text(self, message: Any) -> str | None:
         try:
@@ -823,6 +869,8 @@ class Bridge:
             await self._cmd_status(chat_id)
         elif command == "/model":
             await self._cmd_model(chat_id, open_id, argument)
+        elif command == "/agent":
+            await self._cmd_agent(chat_id, open_id, argument)
         elif command == "/stop":
             await self._cmd_stop(chat_id, argument)
         elif command == "/whoami":
@@ -837,13 +885,15 @@ class Bridge:
                 or "-"
             )
             provider_id, model_id = self._session_model(chat, session_id)
+            agent = self._session_agent(chat, session_id)
             await self.feishu.send_text_async(
                 chat_id,
                 f"open_id: {open_id}\n"
                 f"chat_id: {chat_id}\n"
                 f"session_id: {session_id or '-'}\n"
                 f"会话标题: {title}\n"
-                f"模型: {provider_id}/{model_id}",
+                f"模型: {provider_id}/{model_id}\n"
+                f"Agent: {agent}",
             )
         else:
             await self.feishu.send_text_async(
@@ -1197,11 +1247,16 @@ class Bridge:
                 str(session["model_provider"]),
                 str(session["model_id"]),
             )
+        if session.get("agent"):
+            self.db.update_chat_agent(chat_id, str(session["agent"]))
         self._session_ids.add(session_id)
 
         active_task = self.db.get_active_task(session_id)
         state = _task_state(active_task)
         provider_id, model_id = self._session_model(
+            self.db.get_chat(chat_id), session_id
+        )
+        agent = self._session_agent(
             self.db.get_chat(chat_id), session_id
         )
         last_task = self.db.get_last_task(session_id)
@@ -1237,6 +1292,7 @@ class Bridge:
             title=title,
             session_id=session_id,
             model=f"{provider_id}/{model_id}",
+            agent=agent,
             state=state,
             last_task=last_info,
             empty_text=empty_text,
@@ -1509,6 +1565,7 @@ class Bridge:
         current_provider, current_model = self._session_model(
             chat, session_id
         )
+        current_agent = self._session_agent(chat, session_id)
         current_session = (
             self.db.get_session(session_id) if session_id else None
         )
@@ -1541,6 +1598,7 @@ class Bridge:
             active_task=active,
             pending=pending,
             model=f"{current_provider}/{current_model}",
+            agent=current_agent,
             workspace=workspace,
             sessions=sessions,
             note=note,
@@ -1659,6 +1717,126 @@ class Bridge:
         label = chat.get("session_title") or session_id or "当前会话"
         await self.feishu.send_text_async(
             chat_id, f"已切换 {label} 的模型：{provider_id}/{model_id}"
+        )
+
+    async def _cmd_agent(
+        self, chat_id: str, open_id: str, argument: str
+    ) -> None:
+        self.db.ensure_chat(chat_id, open_id)
+        chat = self.db.get_chat(chat_id)
+        session_id = chat["session_id"] if chat else None
+        directory = self._agent_directory(chat, session_id)
+        try:
+            agents = await self._get_agents(directory, refresh=True)
+        except Exception as exc:
+            log.exception("list agents failed")
+            await self.feishu.send_text_async(
+                chat_id, f"获取 Agent 列表失败: {exc}"
+            )
+            return
+        if not agents:
+            await self.feishu.send_text_async(
+                chat_id,
+                "没有找到可用的 primary agent，"
+                "请检查 OpenCode 的 agent 配置。",
+            )
+            return
+
+        current_agent = self._session_agent(chat, session_id)
+        if argument:
+            selected = self._resolve_agent_argument(agents, argument)
+            if not selected:
+                await self.feishu.send_text_async(
+                    chat_id,
+                    "未找到该 Agent。发送 /agent 查看列表，"
+                    "也可以用 /agent 序号 或 /agent <agent_id>。",
+                )
+                return
+            await self._switch_agent(chat_id, selected)
+            return
+
+        card = agent_select_card(
+            agents=agents,
+            current_agent=current_agent,
+            session_id=session_id,
+            session_title=chat.get("session_title") if chat else None,
+        )
+        await self.feishu.send_card_async(chat_id, card)
+
+    def _resolve_agent_argument(
+        self, agents: list[dict[str, Any]], argument: str
+    ) -> dict[str, Any] | None:
+        argument = argument.strip()
+        if not argument:
+            return None
+        if argument.isdigit():
+            index = int(argument) - 1
+            if 0 <= index < len(agents):
+                return agents[index]
+            return None
+        lowered = argument.lower()
+        for agent in agents:
+            if (
+                agent["id"].lower() == lowered
+                or agent["name"].lower() == lowered
+            ):
+                return agent
+        return None
+
+    async def _switch_agent(
+        self, chat_id: str, agent: dict[str, Any]
+    ) -> None:
+        chat = self.db.get_chat(chat_id)
+        if not chat:
+            await self.feishu.send_text_async(
+                chat_id, "请先发送一条消息创建会话。"
+            )
+            return
+        agent_id = str(agent["id"])
+        session_id = chat.get("session_id")
+        if session_id:
+            active = self.db.get_active_task(session_id)
+            if active:
+                await self.feishu.send_text_async(
+                    chat_id,
+                    f"当前任务 #{active['id']} 还在执行，"
+                    "请先 /stop 或等待完成。",
+                )
+                return
+            previous_agent_id = self._session_agent(chat, session_id)
+            try:
+                await self.oc.switch_agent(session_id, agent_id)
+                await self.oc.set_session_permissions(
+                    session_id,
+                    build_session_permissions(
+                        agent_id,
+                        readonly_agents=self.cfg.readonly_agents,
+                        agent_info=agent,
+                    ),
+                )
+            except Exception as exc:
+                log.exception("switch agent failed")
+                # Best effort: put the previous agent back so a failed
+                # permission update cannot leave a read-only agent with the
+                # bridge's normal edit-approval rules.
+                try:
+                    await self.oc.switch_agent(
+                        session_id, previous_agent_id
+                    )
+                except Exception:
+                    log.exception("rollback agent switch failed")
+                await self.feishu.send_text_async(
+                    chat_id, f"切换 Agent 失败: {exc}"
+                )
+                return
+        self.db.update_chat_agent(chat_id, agent_id)
+        if session_id:
+            self.db.update_session_agent(session_id, agent_id)
+        label = chat.get("session_title") or session_id or "当前会话"
+        await self.feishu.send_text_async(
+            chat_id,
+            f"已切换 {label} 的 Agent："
+            f"{agent['name']}（{agent_id}）",
         )
 
     async def _cmd_stop(self, chat_id: str, argument: str = "") -> None:
@@ -2539,10 +2717,12 @@ class Bridge:
     ) -> str:
         now = datetime.now().strftime("%m%d-%H%M%S")
         session_title = title or f"feishu-{chat_id[-6:]}-{now}"
-        permissions = build_session_permissions()
         self.db.ensure_chat(chat_id, open_id)
         chat = self.db.get_chat(chat_id)
         provider_id, model_id = self._session_model(
+            chat, chat["session_id"] if chat else None
+        )
+        agent = self._session_agent(
             chat, chat["session_id"] if chat else None
         )
 
@@ -2556,11 +2736,40 @@ class Bridge:
                 self.cfg.temp_session_ttl_seconds, 60
             )
 
+        agent_info: dict[str, Any] | None = None
+        try:
+            agents = await self._get_agents(directory)
+            agent_info = next(
+                (item for item in agents if item["id"] == agent), None
+            )
+            if agents and agent_info is None:
+                fallback = self.cfg.agent
+                if not any(item["id"] == fallback for item in agents):
+                    fallback = str(agents[0]["id"])
+                log.warning(
+                    "stored agent %s is not available; falling back to %s",
+                    agent,
+                    fallback,
+                )
+                agent = fallback
+                agent_info = next(
+                    (item for item in agents if item["id"] == agent),
+                    None,
+                )
+        except Exception:
+            log.exception("load agents for session creation failed")
+
+        permissions = build_session_permissions(
+            agent,
+            readonly_agents=self.cfg.readonly_agents,
+            agent_info=agent_info,
+        )
+
         try:
             session_id = await self.oc.create_session(
                 title=session_title,
                 directory=directory,
-                agent=self.cfg.agent,
+                agent=agent,
                 provider_id=provider_id,
                 model_id=model_id,
                 permissions=permissions,
@@ -2580,6 +2789,7 @@ class Bridge:
                 session_title,
                 provider_id,
                 model_id,
+                agent,
                 temporary=temporary,
                 temp_dir=temp_dir,
                 expires_at=expires_at,
@@ -2588,6 +2798,7 @@ class Bridge:
                 self.db.upsert_chat(
                     chat_id, open_id, session_id, session_title
                 )
+                self.db.update_chat_agent(chat_id, agent)
         except Exception:
             try:
                 self.db.delete_session(session_id)
@@ -2809,6 +3020,114 @@ class Bridge:
             card=card,
         )
 
+    def _on_agent_action(
+        self, event: Any, value: dict[str, Any]
+    ) -> P2CardActionTriggerResponse:
+        chat_id = event.context.open_chat_id if event.context else None
+        if not chat_id:
+            return _toast("error", "无法确定会话")
+
+        agent_id = value.get("agent_id")
+        if not agent_id:
+            return _toast("error", "无效 Agent")
+
+        chat = self.db.get_chat(chat_id)
+        if not chat:
+            operator = event.operator.open_id if event.operator else None
+            if not operator:
+                return _toast("error", "无法确定用户")
+            self.db.ensure_chat(chat_id, operator)
+            chat = self.db.get_chat(chat_id)
+
+        requested_session_id = value.get("session_id")
+        if requested_session_id:
+            session = self.db.get_session(str(requested_session_id))
+            if not session or session["chat_id"] != chat_id:
+                return _toast("error", "会话不存在或不属于当前聊天")
+            session_id = str(requested_session_id)
+        else:
+            session_id = chat.get("session_id") if chat else None
+
+        directory = self._agent_directory(chat, session_id)
+        catalog = self._agent_catalog
+        if not catalog or self._agent_catalog_dir != directory:
+            try:
+                catalog = self.oc_sync.list_agents(directory)
+                self._agent_catalog = catalog
+                self._agent_catalog_dir = directory
+                self._agent_catalog_at = time.time()
+            except Exception as exc:
+                log.exception("load agent catalog failed")
+                return _toast("error", f"获取 Agent 列表失败: {exc}")
+
+        selected = next(
+            (
+                agent
+                for agent in catalog
+                if agent["id"] == str(agent_id)
+            ),
+            None,
+        )
+        if not selected:
+            return _toast("error", "Agent 不在列表中，请重新发送 /agent")
+
+        if session_id:
+            active = self.db.get_active_task(session_id)
+            if active:
+                return _toast(
+                    "info",
+                    f"任务 #{active['id']} 执行中，请先 /stop 或等待完成",
+                )
+            previous_agent_id = self._session_agent(chat, session_id)
+            try:
+                self.oc_sync.switch_agent(session_id, str(agent_id))
+                self.oc_sync.set_session_permissions(
+                    session_id,
+                    build_session_permissions(
+                        str(agent_id),
+                        readonly_agents=self.cfg.readonly_agents,
+                        agent_info=selected,
+                    ),
+                )
+            except Exception as exc:
+                log.exception("switch agent failed")
+                try:
+                    self.oc_sync.switch_agent(
+                        session_id, previous_agent_id
+                    )
+                except Exception:
+                    log.exception("rollback agent switch failed")
+                return _toast("error", f"切换失败: {exc}")
+
+        if session_id:
+            self.db.update_session_agent(session_id, str(agent_id))
+        if not session_id or (
+            chat and chat.get("session_id") == session_id
+        ):
+            self.db.update_chat_agent(chat_id, str(agent_id))
+        log.info(
+            "chat %s session %s switched agent to %s",
+            chat_id,
+            session_id,
+            agent_id,
+        )
+        session = self.db.get_session(session_id) if session_id else None
+        label = (
+            (session.get("title") if session else None)
+            or session_id
+            or "当前会话"
+        )
+        card = agent_resolved_card(
+            agent_id=str(agent_id),
+            agent_name=selected["name"],
+            session_label=label,
+        )
+        return _toast(
+            "success",
+            f"已切换 {label} 的 Agent：{selected['name']}",
+            card=card,
+        )
+
     def on_card_action(
         self, data: P2CardActionTrigger
     ) -> P2CardActionTriggerResponse:
@@ -2829,6 +3148,8 @@ class Bridge:
             action = value.get("action")
             if action == "model":
                 return self._on_model_action(event, value)
+            if action == "agent":
+                return self._on_agent_action(event, value)
             if action != "permission":
                 return _toast("info", "未知操作")
 
