@@ -784,9 +784,7 @@ class Bridge:
                 if session and session.get("temporary"):
                     self._touch_session(chat["session_id"])
             if text.startswith("/"):
-                await self._handle_command(
-                    chat_id, open_id, message_id, text
-                )
+                await self._handle_command(chat_id, open_id, text)
                 return
             parsed = parse_schedule_text(text)
             if parsed:
@@ -837,7 +835,7 @@ class Bridge:
     # commands
     # ------------------------------------------------------------------
     async def _handle_command(
-        self, chat_id: str, open_id: str, message_id: str, text: str
+        self, chat_id: str, open_id: str, text: str
     ) -> None:
         parts = text.split(maxsplit=1)
         command = parts[0].lower()
@@ -848,11 +846,9 @@ class Bridge:
                 chat_id, help_text(self._temp_ttl_text())
             )
         elif command == "/new":
-            await self._cmd_new(chat_id, open_id, message_id, argument)
+            await self._cmd_new(chat_id, open_id, argument)
         elif command in ("/temp", "/t", "/临时"):
-            await self._cmd_temp(
-                chat_id, open_id, message_id, argument
-            )
+            await self._cmd_temp(chat_id, open_id, argument)
         elif command in ("/sessions", "/list"):
             await self._cmd_sessions(chat_id)
         elif command in ("/switch", "/use"):
@@ -904,10 +900,9 @@ class Bridge:
         self,
         chat_id: str,
         open_id: str,
-        message_id: str,
         argument: str,
     ) -> None:
-        # /new 不再要求当前会话空闲：旧会话可以继续跑，新会话并行执行。
+        # /new 只创建会话；参数是标题，不发给模型。
         title = _short(argument, 40) if argument else None
         try:
             session_id = await self._create_session(
@@ -920,24 +915,26 @@ class Bridge:
             )
             return
 
+        session = self.db.get_session(session_id)
+        title_text = (
+            (session.get("title") if session else None)
+            or title
+            or session_id
+        )
         try:
             await self.feishu.send_text_async(
                 chat_id,
-                f"已创建并切换到新会话：{title or session_id}\n"
-                f"{session_id}",
+                f"已创建会话【{title_text}】\n"
+                f"{session_id}\n"
+                "直接发送内容开始对话。",
             )
         except Exception:
             log.exception("send new session notice failed")
-        if argument:
-            await self._handle_prompt(
-                chat_id, open_id, message_id, argument
-            )
 
     async def _cmd_temp(
         self,
         chat_id: str,
         open_id: str,
-        message_id: str,
         argument: str,
     ) -> None:
         action = argument.strip().lower()
@@ -951,22 +948,17 @@ class Bridge:
         chat = self.db.get_chat(chat_id)
         current_id = chat["session_id"] if chat else None
         current = self.db.get_session(current_id) if current_id else None
-        if current and current.get("temporary"):
-            if argument:
-                # 已在临时会话中，/temp <任务> 直接在当前临时会话执行。
-                await self._handle_prompt(
-                    chat_id, open_id, message_id, argument
-                )
-            else:
-                await self.feishu.send_text_async(
-                    chat_id,
-                    "当前已经是临时会话。\n"
-                    "直接发送任务即可继续；发送 /temp end 结束并删除临时目录。",
-                )
+        if current and current.get("temporary") and not argument:
+            current_title = current.get("title") or current_id
+            await self.feishu.send_text_async(
+                chat_id,
+                f"当前已经是临时会话【{current_title}】。\n"
+                "直接发送内容即可继续；发送 /temp end 结束并删除临时目录。",
+            )
             return
 
         title = (
-            f"临时: {_short(argument, 40)}"
+            _short(argument, 40)
             if argument
             else f"临时-{datetime.now().strftime('%m%d-%H%M%S')}"
         )
@@ -987,20 +979,22 @@ class Bridge:
 
         session = self.db.get_session(session_id)
         temp_dir = session.get("temp_dir") if session else None
+        title_text = (
+            (session.get("title") if session else None)
+            or title
+            or session_id
+        )
         try:
             await self.feishu.send_text_async(
                 chat_id,
-                f"已创建临时会话：{title}\n"
+                f"已创建临时会话【{title_text}】\n"
                 f"{session_id}\n"
                 f"临时工作目录：{temp_dir or '-'}\n"
-                f"{self._temp_ttl_text()}；发送 /temp end 立即结束。",
+                f"{self._temp_ttl_text()}；发送 /temp end 立即结束。\n"
+                "直接发送内容开始对话。",
             )
         except Exception:
             log.exception("send temp session notice failed")
-        if argument:
-            await self._handle_prompt(
-                chat_id, open_id, message_id, argument
-            )
 
     async def _cmd_temp_end(self, chat_id: str) -> None:
         chat = self.db.get_chat(chat_id)

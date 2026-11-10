@@ -12,6 +12,7 @@ from config import load_config
 from db import Database
 from feishu import FeishuClient
 from opencode import OpenCodeClient, OpenCodeSyncClient
+from slash_commands import sync_slash_commands
 from ws_patch import patch_ws_client
 
 
@@ -84,6 +85,9 @@ def main() -> None:
     lark_loop.create_task(bridge.schedule_loop())
     lark_loop.create_task(bridge.task_watchdog_loop())
     lark_loop.create_task(bridge.notify_stale_tasks())
+    lark_loop.create_task(
+        sync_slash_commands(cfg.feishu_app_id, cfg.feishu_app_secret)
+    )
 
     try:
         client.start()
