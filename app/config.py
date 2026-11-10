@@ -116,6 +116,10 @@ def load_config() -> Config:
         if item.strip()
     )
 
+    workspace_dir = _path(
+        "OPENCODE_DIRECTORY", bridge_home / "workspace", bridge_home
+    )
+
     return Config(
         bridge_home=str(bridge_home),
         data_dir=str(data_dir),
@@ -125,9 +129,7 @@ def load_config() -> Config:
         opencode_base_url=_env("OPENCODE_BASE_URL", "http://127.0.0.1:4096").rstrip("/"),
         opencode_username=_env("OPENCODE_USERNAME", "opencode"),
         opencode_password=_env("OPENCODE_PASSWORD"),
-        workspace_dir=_path(
-            "OPENCODE_DIRECTORY", bridge_home / "workspace", bridge_home
-        ),
+        workspace_dir=workspace_dir,
         agent=_env("OPENCODE_AGENT", "build"),
         readonly_agents=frozenset(
             item.strip()
@@ -156,6 +158,8 @@ def load_config() -> Config:
             "BRIDGE_TEMP_SESSION_TTL_SECONDS", 1800
         ),
         temp_workspace_root=_path(
-            "BRIDGE_TEMP_WORKSPACE_ROOT", data_dir / "temp", data_dir
+            "BRIDGE_TEMP_WORKSPACE_ROOT",
+            Path(workspace_dir) / "temp",
+            data_dir,
         ),
     )

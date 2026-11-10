@@ -118,7 +118,7 @@ python3.13 -m venv .venv
 cp bridge.env.example bridge.env
 chmod 600 bridge.env
 chmod +x backup.sh
-mkdir -p workspace temp
+mkdir -p workspace/temp
 ```
 
 编辑 `bridge.env`，至少填写 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_ALLOWED_OPEN_IDS`、`OPENCODE_PASSWORD`。路径默认值：
@@ -128,9 +128,9 @@ mkdir -p workspace temp
 - `BRIDGE_DATA_DIR` 默认等于 `BRIDGE_HOME`
 - `BRIDGE_DB=$BRIDGE_DATA_DIR/bridge.db`
 - `BRIDGE_LOG=$BRIDGE_DATA_DIR/bridge.log`
-- `BRIDGE_TEMP_WORKSPACE_ROOT=$BRIDGE_DATA_DIR/temp`
+- `BRIDGE_TEMP_WORKSPACE_ROOT=$OPENCODE_DIRECTORY/temp`
 
-上面的 `mkdir -p workspace temp` 已经创建了默认目录。如果 OpenCode 以其他用户运行，确保该用户也能读写 `$HOME/feishu-opencode-bridge/workspace` 和 `$HOME/feishu-opencode-bridge/temp`。
+上面的 `mkdir -p workspace/temp` 已经创建了默认目录。如果 OpenCode 以其他用户运行，确保该用户也能读写 `$HOME/feishu-opencode-bridge/workspace` 和 `$HOME/feishu-opencode-bridge/workspace/temp`。
 
 GitHub 仓库中的源码位于 `app/`；systemd 以 `$HOME/feishu-opencode-bridge` 为工作目录，执行 `app/main.py`。
 
@@ -472,7 +472,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 ## 临时会话
 
 - `/temp [标题]` 创建临时会话并切换过去；参数是标题，不会发给模型。之后发送的内容才会发给模型，可以继续多轮对话。
-- 临时会话使用独立空目录，默认位于 `$BRIDGE_DATA_DIR/temp`（默认 `$BRIDGE_HOME/temp`），创建 OpenCode 会话时作为工作目录传入。
+- 临时会话使用独立空目录，默认位于 `$OPENCODE_DIRECTORY/temp`（默认 `$BRIDGE_HOME/workspace/temp`），创建 OpenCode 会话时作为工作目录传入。
 - 临时会话默认空闲 30 分钟后自动清理；任务执行中、有待审批或待回答提问时不会清理。
 - 每次发送消息、提交任务、任务完成、`/switch` 进入临时会话都会重新计时。
 - 到期时如果临时会话是当前会话，会先清空当前会话，再删除 OpenCode 会话、临时目录和 SQLite 记录；之后发送任意消息会自动创建普通会话。
@@ -638,7 +638,7 @@ OpenCode 的 `question` 工具会创建 form，等待用户输入。桥接器把
   - 工作目录、默认 Agent `OPENCODE_AGENT`、只读 Agent `OPENCODE_READONLY_AGENTS`、模型
   - 进度间隔、审批提醒/超时、提问提醒/超时、任务对账/超时、结果截断长度
   - 临时会话空闲时长 `BRIDGE_TEMP_SESSION_TTL_SECONDS`（默认 1800 秒）
-  - 临时工作目录根路径 `BRIDGE_TEMP_WORKSPACE_ROOT`（默认 `$BRIDGE_DATA_DIR/temp`）
+  - 临时工作目录根路径 `BRIDGE_TEMP_WORKSPACE_ROOT`（默认 `$OPENCODE_DIRECTORY/temp`）
   - 仓库中的 `bridge.env.example` 是变量模板，复制为 `bridge.env` 后填写
 - `$HOME/.config/opencode/service.env`（600）
   - OpenCode 服务环境变量：代理、API Key、服务密码 `OPENCODE_SERVER_PASSWORD`
@@ -655,7 +655,7 @@ OpenCode 的 `question` 工具会创建 form，等待用户输入。桥接器把
 | `BRIDGE_DATA_DIR` | `$BRIDGE_HOME` | 数据目录；相对路径按 `BRIDGE_HOME` 解析 |
 | `BRIDGE_DB` | `$BRIDGE_DATA_DIR/bridge.db` | SQLite 数据库 |
 | `BRIDGE_LOG` | `$BRIDGE_DATA_DIR/bridge.log` | 日志文件 |
-| `BRIDGE_TEMP_WORKSPACE_ROOT` | `$BRIDGE_DATA_DIR/temp` | 临时会话目录 |
+| `BRIDGE_TEMP_WORKSPACE_ROOT` | `$OPENCODE_DIRECTORY/temp` | 临时会话目录 |
 | `OPENCODE_DIRECTORY` | `$BRIDGE_HOME/workspace` | 普通会话工作目录 |
 | `BRIDGE_BACKUP_DIR` | `$BRIDGE_HOME/backups` | 备份输出目录（仅 `backup.sh`） |
 
@@ -784,7 +784,7 @@ sudo systemctl enable --now feishu-opencode-bridge-backup@oc.timer
 | `BRIDGE_DATA_DIR` | `$BRIDGE_HOME` | `$BRIDGE_HOME` |
 | `BRIDGE_DB` | `$BRIDGE_DATA_DIR/bridge.db` | `$BRIDGE_DATA_DIR` |
 | `BRIDGE_LOG` | `$BRIDGE_DATA_DIR/bridge.log` | `$BRIDGE_DATA_DIR` |
-| `BRIDGE_TEMP_WORKSPACE_ROOT` | `$BRIDGE_DATA_DIR/temp` | `$BRIDGE_DATA_DIR` |
+| `BRIDGE_TEMP_WORKSPACE_ROOT` | `$OPENCODE_DIRECTORY/temp` | `$BRIDGE_DATA_DIR` |
 | `OPENCODE_DIRECTORY` | `$BRIDGE_HOME/workspace` | `$BRIDGE_HOME` |
 | `BRIDGE_BACKUP_DIR` | `$BRIDGE_HOME/backups` | `$BRIDGE_HOME`（仅 `backup.sh`） |
 
@@ -793,7 +793,7 @@ sudo systemctl enable --now feishu-opencode-bridge-backup@oc.timer
 - `BRIDGE_ENV_FILE` 是启动引导变量，只能来自进程环境，不能写在 `bridge.env` 里；默认 `$BRIDGE_HOME/bridge.env`，相对路径按 `BRIDGE_HOME` 解析。
 - 如果 `BRIDGE_HOME` 只写在 `bridge.env` 里，`bridge.env` 本身仍从默认位置（仓库根目录）加载；`BRIDGE_HOME` 只影响后续路径解析。要改变 `bridge.env` 的加载位置，必须通过进程环境设置 `BRIDGE_HOME` 或 `BRIDGE_ENV_FILE`。
 - 进程环境优先于 `bridge.env`，所以 systemd drop-in 里的 `Environment=BRIDGE_DATA_DIR=...` 会覆盖 `bridge.env` 中的同名变量。
-- 把数据放到其他位置时，在 `bridge.env` 中设置 `BRIDGE_DATA_DIR` 即可；`BRIDGE_DB` / `BRIDGE_LOG` / `BRIDGE_TEMP_WORKSPACE_ROOT` 会自动跟随。需要单独指定时再覆盖它们。
+- 把数据放到其他位置时，在 `bridge.env` 中设置 `BRIDGE_DATA_DIR` 即可；`BRIDGE_DB` / `BRIDGE_LOG` 会自动跟随。`BRIDGE_TEMP_WORKSPACE_ROOT` 默认跟随 `OPENCODE_DIRECTORY`（`$OPENCODE_DIRECTORY/temp`），需要单独指定时再覆盖。
 
 示例：
 
