@@ -85,6 +85,8 @@ class Config:
     progress_min_interval: int
     permission_remind_seconds: int
     permission_expire_seconds: int
+    form_remind_seconds: int
+    form_expire_seconds: int
     task_reconcile_seconds: int
     task_reconcile_grace_seconds: int
     task_timeout_seconds: int
@@ -141,6 +143,8 @@ def load_config() -> Config:
         progress_min_interval=_env_int("BRIDGE_PROGRESS_MIN_INTERVAL", 20),
         permission_remind_seconds=_env_int("BRIDGE_PERMISSION_REMIND_SECONDS", 600),
         permission_expire_seconds=_env_int("BRIDGE_PERMISSION_EXPIRE_SECONDS", 1800),
+        form_remind_seconds=_env_int("BRIDGE_FORM_REMIND_SECONDS", 300),
+        form_expire_seconds=_env_int("BRIDGE_FORM_EXPIRE_SECONDS", 1800),
         task_reconcile_seconds=_env_int("BRIDGE_TASK_RECONCILE_SECONDS", 60),
         task_reconcile_grace_seconds=_env_int(
             "BRIDGE_TASK_RECONCILE_GRACE_SECONDS", 120

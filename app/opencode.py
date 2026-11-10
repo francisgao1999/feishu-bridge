@@ -322,6 +322,67 @@ class OpenCodeClient:
             json={"decision": decision},
         )
 
+    async def list_session_forms(
+        self, session_id: str
+    ) -> list[dict[str, Any]]:
+        try:
+            data = await self._request(
+                "GET", f"/api/session/{session_id}/form"
+            )
+        except OpenCodeError as exc:
+            if exc.status_code == 404:
+                return []
+            raise
+        if isinstance(data, dict):
+            payload = data.get("data")
+            if isinstance(payload, list):
+                return [item for item in payload if isinstance(item, dict)]
+        return []
+
+    async def get_form(
+        self, session_id: str, form_id: str
+    ) -> dict[str, Any] | None:
+        try:
+            data = await self._request(
+                "GET", f"/api/session/{session_id}/form/{form_id}"
+            )
+        except OpenCodeError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        if isinstance(data, dict):
+            payload = data.get("data")
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    async def reply_form(
+        self, session_id: str, form_id: str, answer: dict[str, Any]
+    ) -> None:
+        await self._request(
+            "POST",
+            f"/api/session/{session_id}/form/{form_id}/reply",
+            json={"answer": answer},
+        )
+
+    async def cancel_form(
+        self,
+        session_id: str,
+        form_id: str,
+        message: str | None = None,
+    ) -> None:
+        params = {"message": message} if message else None
+        try:
+            await self._request(
+                "DELETE",
+                f"/api/session/{session_id}/form/{form_id}",
+                params=params,
+            )
+        except OpenCodeError as exc:
+            # The form may have been answered or cancelled elsewhere.
+            if exc.status_code != 404:
+                raise
+
     async def interrupt(self, session_id: str) -> Any:
         return await self._request("POST", f"/api/session/{session_id}/interrupt")
 
@@ -424,6 +485,30 @@ class OpenCodeSyncClient:
             f"/api/session/{session_id}/permission/{permission_id}/reply",
             json={"decision": decision},
         )
+        self._check(response)
+
+    def reply_form(
+        self, session_id: str, form_id: str, answer: dict[str, Any]
+    ) -> None:
+        response = self._client.post(
+            f"/api/session/{session_id}/form/{form_id}/reply",
+            json={"answer": answer},
+        )
+        self._check(response)
+
+    def cancel_form(
+        self,
+        session_id: str,
+        form_id: str,
+        message: str | None = None,
+    ) -> None:
+        params = {"message": message} if message else None
+        response = self._client.delete(
+            f"/api/session/{session_id}/form/{form_id}",
+            params=params,
+        )
+        if response.status_code == 404:
+            return
         self._check(response)
 
     def list_models(self) -> list[dict[str, str]]:

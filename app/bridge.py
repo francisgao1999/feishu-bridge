@@ -39,6 +39,13 @@ from cards import (
 from config import Config
 from db import Database
 from feishu import FeishuClient
+from forms import (
+    answer_from_form_value,
+    build_form_card,
+    build_form_resolved_card,
+    parse_answer,
+    parse_fields,
+)
 from opencode import OpenCodeClient, OpenCodeError, OpenCodeSyncClient
 from permissions import build_session_permissions
 
@@ -582,6 +589,7 @@ class Bridge:
         self._agent_catalog_at: float = 0.0
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._clean_pending: dict[str, set[str]] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._stopping = False
 
     # ------------------------------------------------------------------
@@ -620,6 +628,49 @@ class Bridge:
             except Exception:
                 log.exception("notify stale task %s failed", task["id"])
         self._stale_tasks = []
+        await self._recover_forms()
+
+    async def _recover_forms(self) -> None:
+        """Cancel forms whose task is no longer active after a restart."""
+        for form in self.db.list_pending_forms():
+            task_id = form.get("task_id")
+            task = self.db.get_task(task_id) if task_id else None
+            if task and task["status"] in ("queued", "running"):
+                continue
+            try:
+                await self.oc.cancel_form(
+                    form["session_id"],
+                    form["id"],
+                    "桥接器重启，提问已失效",
+                )
+            except OpenCodeError as exc:
+                if exc.status_code == 409:
+                    current = await self._refresh_form(form)
+                    if current["status"] != "pending":
+                        await self._update_form_card(current)
+                        continue
+                log.warning(
+                    "cancel orphan form %s failed: %s",
+                    form["id"],
+                    exc,
+                )
+            except Exception as exc:
+                log.warning(
+                    "cancel orphan form %s failed: %s",
+                    form["id"],
+                    exc,
+                )
+            self.db.update_form(
+                form["id"],
+                status="expired",
+                message="桥接器重启，提问已失效",
+                interrupted=1
+                if task and task["status"] in ("failed", "interrupted")
+                else 0,
+            )
+            current = self.db.get_form(form["id"])
+            if current:
+                await self._update_form_card(current)
 
     async def shutdown(self) -> None:
         self._stopping = True
@@ -1123,6 +1174,7 @@ class Bridge:
             return
 
         pending = self.db.list_pending_permissions()
+        pending_forms = self.db.list_pending_forms()
         items: list[dict[str, Any]] = []
         active_title: str | None = None
         for index, session in enumerate(sessions, 1):
@@ -1131,6 +1183,11 @@ class Bridge:
             pending_count = sum(
                 1
                 for item in pending
+                if item["session_id"] == session_id
+            )
+            form_count = sum(
+                1
+                for item in pending_forms
                 if item["session_id"] == session_id
             )
             flags: list[str] = []
@@ -1145,6 +1202,8 @@ class Bridge:
             flags.append(_task_state(active_task))
             if pending_count:
                 flags.append(f"待审批 {pending_count}")
+            if form_count:
+                flags.append(f"待回答 {form_count}")
             title = session.get("title") or "(无标题)"
             if session_id == active_id:
                 active_title = title
@@ -1429,6 +1488,10 @@ class Bridge:
                 )
             self.db.update_permission(permission["id"], status="expired")
             await self._update_permission_card(permission, "expired")
+
+        await self._cancel_forms_for_session(
+            session_id, "会话已删除，提问自动取消"
+        )
 
         try:
             await self.oc.delete_session(session_id)
@@ -1888,6 +1951,9 @@ class Bridge:
                 )
             self.db.update_permission(permission["id"], status="expired")
             await self._update_permission_card(permission, "expired")
+        await self._cancel_forms_for_session(
+            session_id, "用户中止任务，提问自动取消"
+        )
         if active.get("card_message_id"):
             try:
                 await self.feishu.update_card_async(
@@ -2615,12 +2681,23 @@ class Bridge:
         active = self.db.get_active_task(session_id)
         if active:
             if notify_busy:
-                await self.feishu.send_text_async(
-                    chat_id,
-                    f"当前任务 #{active['id']} 还在执行（{active['status']}）。"
-                    "请等待完成，或发送 /stop 中止。",
-                )
+                if self.db.has_pending_forms(session_id):
+                    message = (
+                        f"当前任务 #{active['id']} 正在等待你回答提问。"
+                        "请先处理提问卡片，或发送 /stop 中止。"
+                    )
+                else:
+                    message = (
+                        f"当前任务 #{active['id']} 还在执行"
+                        f"（{active['status']}）。"
+                        "请等待完成，或发送 /stop 中止。"
+                    )
+                await self.feishu.send_text_async(chat_id, message)
             return None
+
+        await self._cancel_forms_for_session(
+            session_id, "新任务已提交，旧提问自动取消"
+        )
 
         for permission in self.db.list_pending_permissions():
             if permission["session_id"] != session_id:
@@ -3122,6 +3199,131 @@ class Bridge:
             card=card,
         )
 
+    def _on_form_submit(
+        self,
+        data: P2CardActionTrigger,
+        event: Any,
+        value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse:
+        form_id = value.get("form_id")
+        if not form_id:
+            return _toast("error", "无效提问")
+        form = self.db.get_form(str(form_id))
+        if not form:
+            return _toast("error", "提问不存在")
+        if form["status"] != "pending":
+            return _toast(
+                "info",
+                "该提问已处理",
+                card=self._resolved_form_card(form),
+            )
+
+        fields = parse_fields(form.get("fields"))
+        form_value = event.action.form_value if event.action else None
+        answer, error = answer_from_form_value(fields, form_value)
+        if error:
+            return _toast("error", error)
+
+        event_id = data.header.event_id if data.header else None
+        if event_id:
+            self.db.mark_event_processed(event_id)
+
+        log.info(
+            "form submit form_id=%s card_message_id=%s",
+            form_id,
+            form.get("card_message_id"),
+        )
+        try:
+            self.oc_sync.reply_form(
+                form["session_id"], str(form_id), answer or {}
+            )
+        except Exception as exc:
+            log.exception("form reply failed")
+            return _toast("error", f"提交失败: {exc}")
+
+        self.db.update_form(
+            str(form_id),
+            status="replied",
+            answer=json.dumps(answer or {}, ensure_ascii=False),
+        )
+        current = self.db.get_form(str(form_id)) or form
+        return _toast(
+            "success",
+            "已提交",
+            card=self._resolved_form_card(current),
+        )
+
+    def _on_form_cancel(
+        self,
+        data: P2CardActionTrigger,
+        event: Any,
+        value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse:
+        form_id = value.get("form_id")
+        if not form_id:
+            return _toast("error", "无效提问")
+        form = self.db.get_form(str(form_id))
+        if not form:
+            return _toast("error", "提问不存在")
+        if form["status"] != "pending":
+            return _toast(
+                "info",
+                "该提问已处理",
+                card=self._resolved_form_card(form),
+            )
+
+        event_id = data.header.event_id if data.header else None
+        if event_id:
+            self.db.mark_event_processed(event_id)
+
+        log.info(
+            "form cancel form_id=%s card_message_id=%s",
+            form_id,
+            form.get("card_message_id"),
+        )
+        try:
+            self.oc_sync.cancel_form(
+                form["session_id"],
+                str(form_id),
+                "用户在飞书中取消了提问",
+            )
+        except Exception as exc:
+            log.exception("form cancel failed")
+            return _toast("error", f"取消失败: {exc}")
+
+        self.db.update_form(
+            str(form_id), status="cancelled", message="用户取消"
+        )
+        current = self.db.get_form(str(form_id)) or form
+        # The card callback runs on the event loop but is synchronous, so
+        # schedule the interrupt instead of blocking the callback.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            task = loop.create_task(
+                self._finish_form_cancel(str(form_id), "提问已取消")
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        return _toast(
+            "success",
+            "已取消提问，任务将中断",
+            card=self._resolved_form_card(current),
+        )
+
+    async def _finish_form_cancel(
+        self, form_id: str, reason: str
+    ) -> None:
+        form = self.db.get_form(form_id)
+        if not form:
+            return
+        await self._interrupt_task_for_form(form, reason)
+        current = self.db.get_form(form_id)
+        if current:
+            await self._update_form_card(current)
+
     def on_card_action(
         self, data: P2CardActionTrigger
     ) -> P2CardActionTriggerResponse:
@@ -3138,12 +3340,37 @@ class Bridge:
 
             value = event.action.value if event.action else None
             if not isinstance(value, dict):
-                return _toast("error", "无效操作")
+                value = {}
             action = value.get("action")
+            if action is None and event.action:
+                name = event.action.name or ""
+                if name.startswith("submit_"):
+                    action = "form_submit"
+                    value = {
+                        "action": action,
+                        "form_id": name[len("submit_") :],
+                    }
+            if action is None and event.action and event.action.tag in (
+                "select_static",
+                "multi_select_static",
+                "input",
+                "date_picker",
+                "picker_time",
+                "picker_datetime",
+                "checker",
+            ):
+                # Form components emit callbacks on every change. The
+                # final values arrive with the submit button, so ignore
+                # these intermediate events without showing a toast.
+                return P2CardActionTriggerResponse({})
             if action == "model":
                 return self._on_model_action(event, value)
             if action == "agent":
                 return self._on_agent_action(event, value)
+            if action == "form_submit":
+                return self._on_form_submit(data, event, value)
+            if action == "form_cancel":
+                return self._on_form_cancel(data, event, value)
             if action != "permission":
                 return _toast("info", "未知操作")
 
@@ -3249,7 +3476,13 @@ class Bridge:
     async def _handle_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
         data = event.get("data") or {}
-        session_id = data.get("sessionID")
+        if event_type == "form.created":
+            form = data.get("form") or {}
+            session_id = (
+                form.get("sessionID") if isinstance(form, dict) else None
+            )
+        else:
+            session_id = data.get("sessionID")
 
         if session_id and session_id not in self._session_ids:
             return
@@ -3258,6 +3491,12 @@ class Bridge:
             await self._on_permission_asked(data)
         elif event_type == "permission.replied":
             await self._on_permission_replied(data)
+        elif event_type == "form.created":
+            await self._on_form_created(data.get("form") or {})
+        elif event_type == "form.replied":
+            await self._on_form_replied(data)
+        elif event_type == "form.cancelled":
+            await self._on_form_cancelled(data)
         elif event_type == "session.execution.started":
             await self._on_execution_started(session_id)
         elif event_type == "session.execution.succeeded":
@@ -3571,6 +3810,8 @@ class Bridge:
                     continue
                 if self.db.has_pending_permissions(session_id):
                     continue
+                if self.db.has_pending_forms(session_id):
+                    continue
 
                 chat = self.db.get_chat(chat_id)
                 was_current = bool(
@@ -3630,6 +3871,10 @@ class Bridge:
             return
 
         session_id = task["session_id"]
+        if self.db.has_pending_forms(session_id):
+            # The task is legitimately waiting for the user to answer a
+            # question. The form expiry loop owns this timeout.
+            return
         if session_id in active_sessions:
             if age >= self.cfg.task_timeout_seconds:
                 log.warning(
@@ -3865,6 +4110,458 @@ class Bridge:
                 )
             except Exception:
                 log.exception("update approval card failed")
+
+    # ------------------------------------------------------------------
+    # forms
+    # ------------------------------------------------------------------
+    def _form_prompt(self, form: dict[str, Any]) -> str:
+        task_id = form.get("task_id")
+        if not task_id:
+            return ""
+        task = self.db.get_task(task_id)
+        if not task:
+            return ""
+        return task.get("prompt") or ""
+
+    def _resolved_form_card(
+        self, form: dict[str, Any]
+    ) -> dict[str, Any]:
+        return build_form_resolved_card(
+            title=form.get("title") or "提问",
+            fields=parse_fields(form.get("fields")),
+            status=form.get("status") or "expired",
+            answer=parse_answer(form.get("answer")),
+            message=form.get("message"),
+            prompt=self._form_prompt(form),
+            session_id=form.get("session_id") or "",
+            interrupted=bool(form.get("interrupted")),
+        )
+
+    async def _send_form_card(self, form: dict[str, Any]) -> None:
+        card = build_form_card(
+            form_id=form["id"],
+            title=form.get("title") or "提问",
+            fields=parse_fields(form.get("fields")),
+            prompt=self._form_prompt(form),
+            session_id=form.get("session_id") or "",
+            expire_seconds=self.cfg.form_expire_seconds,
+        )
+        try:
+            log.info(
+                "sending form card for %s to %s",
+                form["id"],
+                form["chat_id"],
+            )
+            card_message_id = await self.feishu.send_card_async(
+                form["chat_id"], card
+            )
+            log.info(
+                "form card sent for %s: %s",
+                form["id"],
+                card_message_id,
+            )
+            if card_message_id:
+                self.db.update_form(
+                    form["id"], card_message_id=card_message_id
+                )
+        except Exception:
+            log.exception("send form card failed")
+
+    async def _update_form_card(self, form: dict[str, Any]) -> None:
+        if not form.get("card_message_id"):
+            return
+        try:
+            await self.feishu.update_card_async(
+                form["card_message_id"], self._resolved_form_card(form)
+            )
+        except Exception:
+            log.exception("update form card failed")
+
+    async def _refresh_form(
+        self, form: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Refresh a form from OpenCode after a 409 (already settled)."""
+        try:
+            detail = await self.oc.get_form(
+                form["session_id"], form["id"]
+            )
+        except Exception as exc:
+            log.warning("refresh form %s failed: %s", form["id"], exc)
+            return form
+        if not detail:
+            return form
+        state = detail.get("state") or {}
+        status = state.get("status")
+        if status == "answered":
+            self.db.update_form(
+                form["id"],
+                status="replied",
+                answer=json.dumps(
+                    state.get("answer") or {}, ensure_ascii=False
+                ),
+            )
+        elif status == "cancelled":
+            self.db.update_form(
+                form["id"],
+                status="cancelled",
+                message=state.get("message") or "已取消",
+            )
+        return self.db.get_form(form["id"]) or form
+
+    async def _on_form_created(
+        self, form: dict[str, Any]
+    ) -> None:
+        form_id = form.get("id")
+        session_id = form.get("sessionID")
+        if not form_id or not session_id:
+            return
+        if session_id not in self._session_ids:
+            return
+
+        chat = self.db.get_chat_by_session(session_id)
+        if not chat:
+            log.warning("form for unknown session %s", session_id)
+            return
+
+        task = self.db.get_active_task(session_id)
+        if not task:
+            log.info(
+                "cancelling stale form %s for session %s "
+                "(no active task)",
+                form_id,
+                session_id,
+            )
+            try:
+                await self.oc.cancel_form(
+                    session_id, form_id, "任务已结束，提问自动取消"
+                )
+            except Exception as exc:
+                log.warning(
+                    "cancel stale form %s failed: %s", form_id, exc
+                )
+            return
+
+        existing = self.db.get_form(form_id)
+        if existing:
+            if existing["status"] == "pending" and not existing.get(
+                "card_message_id"
+            ):
+                await self._send_form_card(existing)
+            return
+
+        inserted = self.db.add_form(
+            form_id=form_id,
+            session_id=session_id,
+            chat_id=chat["chat_id"],
+            task_id=task["id"],
+            title=str(form.get("title") or "提问"),
+            fields=parse_fields(form.get("fields")),
+        )
+        if not inserted:
+            return
+        stored = self.db.get_form(form_id)
+        if stored:
+            await self._send_form_card(stored)
+
+    async def _on_form_replied(
+        self, data: dict[str, Any]
+    ) -> None:
+        form_id = data.get("id")
+        if not form_id:
+            return
+        form = self.db.get_form(form_id)
+        if not form:
+            return
+        if form["status"] == "pending":
+            answer = data.get("answer") or {}
+            self.db.update_form(
+                form_id,
+                status="replied",
+                answer=json.dumps(answer, ensure_ascii=False),
+            )
+            form = self.db.get_form(form_id)
+        if form:
+            await self._update_form_card(form)
+
+    async def _on_form_cancelled(
+        self, data: dict[str, Any]
+    ) -> None:
+        form_id = data.get("id")
+        if not form_id:
+            return
+        form = self.db.get_form(form_id)
+        if not form:
+            return
+        was_pending = form["status"] == "pending"
+        if was_pending:
+            self.db.update_form(
+                form_id, status="cancelled", message="已取消"
+            )
+            form = self.db.get_form(form_id)
+        if not form:
+            return
+        if was_pending:
+            await self._interrupt_task_for_form(form, "提问已取消")
+        current = self.db.get_form(form_id)
+        if current:
+            await self._update_form_card(current)
+
+    async def _interrupt_task_for_form(
+        self, form: dict[str, Any], reason: str
+    ) -> bool:
+        task_id = form.get("task_id")
+        if not task_id:
+            return False
+        task = self.db.get_task(task_id)
+        if not task or task["status"] not in ("queued", "running"):
+            return False
+        try:
+            await self.oc.interrupt(form["session_id"])
+        except Exception as exc:
+            log.warning(
+                "interrupt task %s after form cancel failed: %s",
+                task_id,
+                exc,
+            )
+        if not self.db.complete_task(
+            task_id, "interrupted", error=reason
+        ):
+            current_task = self.db.get_task(task_id)
+            if current_task and current_task["status"] == "interrupted":
+                self.db.update_form(form["id"], interrupted=1)
+            return False
+        self.db.update_form(form["id"], interrupted=1)
+        if task.get("card_message_id"):
+            try:
+                await self.feishu.update_card_async(
+                    task["card_message_id"],
+                    progress_card(
+                        status="已中止",
+                        prompt=task["prompt"],
+                        error=reason,
+                        session_id=task["session_id"],
+                    ),
+                )
+            except Exception:
+                log.exception("update interrupted task card failed")
+        await self.feishu.send_text_async(
+            task["chat_id"], f"任务 #{task_id} 已中断：{reason}"
+        )
+        return True
+
+    async def _cancel_forms_for_session(
+        self,
+        session_id: str,
+        reason: str,
+        *,
+        interrupt: bool = False,
+    ) -> None:
+        for form in self.db.list_pending_forms():
+            if form["session_id"] != session_id:
+                continue
+            try:
+                await self.oc.cancel_form(
+                    session_id, form["id"], reason
+                )
+            except OpenCodeError as exc:
+                if exc.status_code == 409:
+                    current = await self._refresh_form(form)
+                    if current["status"] != "pending":
+                        await self._update_form_card(current)
+                        continue
+                log.warning(
+                    "cancel form %s failed: %s", form["id"], exc
+                )
+            except Exception as exc:
+                log.warning(
+                    "cancel form %s failed: %s", form["id"], exc
+                )
+            self.db.update_form(
+                form["id"], status="cancelled", message=reason
+            )
+            current = self.db.get_form(form["id"])
+            if not current:
+                continue
+            if interrupt:
+                await self._interrupt_task_for_form(current, reason)
+                current = self.db.get_form(form["id"]) or current
+            await self._update_form_card(current)
+
+    async def form_poll_loop(self) -> None:
+        while not self._stopping:
+            try:
+                for task in self.db.list_active_tasks():
+                    session_id = task["session_id"]
+                    if session_id not in self._session_ids:
+                        continue
+                    try:
+                        forms = await self.oc.list_session_forms(
+                            session_id
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "list forms for %s failed: %s",
+                            session_id,
+                            exc,
+                        )
+                        continue
+                    for form in forms:
+                        try:
+                            await self._on_form_created(form)
+                        except Exception:
+                            log.exception(
+                                "handle polled form %s failed",
+                                form.get("id"),
+                            )
+
+                for form in self.db.list_pending_forms():
+                    try:
+                        detail = await self.oc.get_form(
+                            form["session_id"], form["id"]
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "get form %s failed: %s", form["id"], exc
+                        )
+                        continue
+                    if detail is None:
+                        self.db.update_form(
+                            form["id"],
+                            status="expired",
+                            message="提问已不存在",
+                        )
+                        current = self.db.get_form(form["id"])
+                        if current:
+                            await self._interrupt_task_for_form(
+                                current, "提问已不存在，任务已中断"
+                            )
+                            current = (
+                                self.db.get_form(form["id"]) or current
+                            )
+                            await self._update_form_card(current)
+                        continue
+                    state = detail.get("state") or {}
+                    status = state.get("status")
+                    if status == "answered":
+                        self.db.update_form(
+                            form["id"],
+                            status="replied",
+                            answer=json.dumps(
+                                state.get("answer") or {},
+                                ensure_ascii=False,
+                            ),
+                        )
+                        current = self.db.get_form(form["id"])
+                        if current:
+                            await self._update_form_card(current)
+                    elif status == "cancelled":
+                        self.db.update_form(
+                            form["id"],
+                            status="cancelled",
+                            message=state.get("message") or "已取消",
+                        )
+                        current = self.db.get_form(form["id"])
+                        if current:
+                            await self._interrupt_task_for_form(
+                                current, "提问已取消"
+                            )
+                            current = (
+                                self.db.get_form(form["id"]) or current
+                            )
+                            await self._update_form_card(current)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("form poll failed")
+            await asyncio.sleep(30)
+
+    async def form_expiry_loop(self) -> None:
+        while not self._stopping:
+            try:
+                now = time.time()
+                for form in self.db.list_pending_forms():
+                    age = now - form["created_at"]
+                    if (
+                        self.cfg.form_expire_seconds > 0
+                        and age >= self.cfg.form_expire_seconds
+                    ):
+                        current = self.db.get_form(form["id"])
+                        if (
+                            not current
+                            or current["status"] != "pending"
+                        ):
+                            continue
+                        reason = "提问超时，已自动取消"
+                        try:
+                            await self.oc.cancel_form(
+                                current["session_id"],
+                                current["id"],
+                                reason,
+                            )
+                        except OpenCodeError as exc:
+                            if exc.status_code == 409:
+                                current = await self._refresh_form(
+                                    current
+                                )
+                                if current["status"] == "replied":
+                                    await self._update_form_card(
+                                        current
+                                    )
+                                    continue
+                                if current["status"] == "cancelled":
+                                    await self._interrupt_task_for_form(
+                                        current, "提问已取消"
+                                    )
+                                    current = (
+                                        self.db.get_form(current["id"])
+                                        or current
+                                    )
+                                    await self._update_form_card(
+                                        current
+                                    )
+                                    continue
+                            log.warning(
+                                "auto cancel form %s failed: %s",
+                                current["id"],
+                                exc,
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "auto cancel form %s failed: %s",
+                                current["id"],
+                                exc,
+                            )
+                        self.db.update_form(
+                            current["id"],
+                            status="expired",
+                            message=reason,
+                        )
+                        current = self.db.get_form(current["id"])
+                        if not current:
+                            continue
+                        await self._interrupt_task_for_form(
+                            current, reason
+                        )
+                        current = (
+                            self.db.get_form(current["id"]) or current
+                        )
+                        await self._update_form_card(current)
+                    elif (
+                        self.cfg.form_remind_seconds > 0
+                        and age >= self.cfg.form_remind_seconds
+                        and not form["reminded"]
+                    ):
+                        self.db.update_form(form["id"], reminded=1)
+                        await self.feishu.send_text_async(
+                            form["chat_id"],
+                            "提问还在等待回答，"
+                            "请在卡片中提交或取消。",
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("form expiry loop failed")
+            await asyncio.sleep(60)
 
     async def permission_poll_loop(self) -> None:
         while not self._stopping:

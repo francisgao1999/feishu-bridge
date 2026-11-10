@@ -66,6 +66,23 @@ CREATE TABLE IF NOT EXISTS permissions (
     updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS forms (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    task_id INTEGER,
+    title TEXT NOT NULL DEFAULT '',
+    fields TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    answer TEXT,
+    message TEXT,
+    interrupted INTEGER NOT NULL DEFAULT 0,
+    card_message_id TEXT,
+    reminded INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id TEXT NOT NULL,
@@ -103,6 +120,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_chat
     ON tasks(chat_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_permissions_status
     ON permissions(status);
+CREATE INDEX IF NOT EXISTS idx_forms_status
+    ON forms(status);
+CREATE INDEX IF NOT EXISTS idx_forms_session
+    ON forms(session_id);
 CREATE INDEX IF NOT EXISTS idx_schedules_due
     ON schedules(enabled, next_run_at);
 """
@@ -167,6 +188,19 @@ class Database:
                 self._conn.execute(
                     "ALTER TABLE schedules ADD COLUMN mode TEXT "
                     "NOT NULL DEFAULT 'task'"
+                )
+            form_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(forms)")
+            }
+            if "message" not in form_columns:
+                self._conn.execute(
+                    "ALTER TABLE forms ADD COLUMN message TEXT"
+                )
+            if "interrupted" not in form_columns:
+                self._conn.execute(
+                    "ALTER TABLE forms ADD COLUMN interrupted INTEGER "
+                    "NOT NULL DEFAULT 0"
                 )
             self._migrate_sessions()
 
@@ -519,6 +553,9 @@ class Database:
                 "DELETE FROM permissions WHERE session_id=?", (session_id,)
             )
             self._conn.execute(
+                "DELETE FROM forms WHERE session_id=?", (session_id,)
+            )
+            self._conn.execute(
                 "DELETE FROM tasks WHERE session_id=?", (session_id,)
             )
             self._conn.execute(
@@ -797,6 +834,83 @@ class Database:
                 LIMIT 1
                 """,
                 (task_id,),
+            ).fetchone()
+            return row is not None
+
+    # ------------------------------------------------------------------
+    # forms
+    # ------------------------------------------------------------------
+    def add_form(
+        self,
+        form_id: str,
+        session_id: str,
+        chat_id: str,
+        task_id: int | None,
+        title: str,
+        fields: list[dict[str, Any]],
+    ) -> bool:
+        now = int(time.time())
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO forms(
+                    id, session_id, chat_id, task_id, title, fields,
+                    status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    form_id,
+                    session_id,
+                    chat_id,
+                    task_id,
+                    title,
+                    json.dumps(fields, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            return cur.rowcount == 1
+
+    def get_form(self, form_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM forms WHERE id=?", (form_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_form(self, form_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        fields["updated_at"] = int(time.time())
+        columns = ", ".join(f"{key}=?" for key in fields)
+        values = list(fields.values())
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"UPDATE forms SET {columns} WHERE id=?",
+                (*values, form_id),
+            )
+
+    def list_pending_forms(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM forms
+                WHERE status='pending'
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def has_pending_forms(self, session_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1 FROM forms
+                WHERE session_id=? AND status='pending'
+                LIMIT 1
+                """,
+                (session_id,),
             ).fetchone()
             return row is not None
 

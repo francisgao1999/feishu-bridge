@@ -9,8 +9,8 @@
 - 飞书自建应用 `oc-bot`，通过 WebSocket 长连接接收消息和卡片回调，不需要公网 IP。
 - 桥接器：Python 3.13 + `lark-oapi 1.7.5`，由 systemd 常驻。
 - OpenCode V2 HTTP API：`127.0.0.1:4096`，HTTP Basic 认证。
-- SQLite：保存 chat / session / task / permission / schedule / 事件去重。
-- SSE `/api/event` 接收进度和权限事件；每 30 秒轮询权限接口兜底。
+- SQLite：保存 chat / session / task / permission / form / schedule / 事件去重。
+- SSE `/api/event` 接收进度、权限和提问事件；每 30 秒轮询权限和提问接口兜底。
 
 ## 目录结构
 
@@ -23,6 +23,7 @@
 │   ├── config.py
 │   ├── db.py
 │   ├── feishu.py
+│   ├── forms.py
 │   ├── opencode.py
 │   ├── permissions.py
 │   └── ws_patch.py
@@ -38,6 +39,7 @@
 ├── tests/               # 单元测试（unittest）
 │   ├── test_config.py
 │   ├── test_db.py
+│   ├── test_forms.py
 │   ├── test_opencode.py
 │   ├── test_permissions.py
 │   └── test_backup.py
@@ -325,7 +327,7 @@ python3 -m compileall -q app debug tests
 bash -n backup.sh
 ```
 
-测试覆盖 `app/config.py` 的默认路径、变量覆盖、只读 Agent 配置和 `bridge.env` 加载，`app/opencode.py` 的 Agent 列表解析，`app/permissions.py` 的只读 Agent 检测和会话权限规则，`app/db.py` 的 Agent 字段迁移与读写，以及 `backup.sh` 的默认/自定义路径、缺失数据库和备份权限。
+测试覆盖 `app/config.py` 的默认路径、变量覆盖、只读 Agent 配置和 `bridge.env` 加载，`app/opencode.py` 的 Agent 列表解析，`app/permissions.py` 的只读 Agent 检测和会话权限规则，`app/forms.py` 的表单卡构建与答案转换，`app/db.py` 的 Agent 字段迁移、forms CRUD 与读写，以及 `backup.sh` 的默认/自定义路径、缺失数据库和备份权限。
 
 ## 调试工具
 
@@ -373,7 +375,7 @@ tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 - `/temp [标题]`（或 `/t`、`/临时`）：创建并切换到临时会话；参数是会话标题，不会发给模型。临时会话使用独立空目录，空闲 30 分钟后自动清理
 - `/temp end`（或 `/temp 结束`、`/temp stop`）：结束当前临时会话，删除 OpenCode 会话和临时工作目录，并清空当前会话
 - `/temp list`（或 `/temp 列表`）：查看临时会话、剩余时间和临时目录
-- `/sessions`（或 `/list`）：以卡片列出全部会话、运行状态、待审批数量；顶部固定显示当前会话，列表中用 `[当前]` 标记
+- `/sessions`（或 `/list`）：以卡片列出全部会话、运行状态、待审批/待回答数量；顶部固定显示当前会话，列表中用 `[当前]` 标记
 - `/switch <序号|session_id|标题>`（或 `/use`）：切换当前会话；同时显示目标会话的模型、Agent、上次任务的状态、完成时间和结果摘要
 - `/last [序号|session_id]`（或 `/result`）：重发该会话最后一次任务结果，默认当前会话
 - `/delete <序号|session_id|标题>`（或 `/remove`、`/删除`）：删除一个空闲会话（当前会话不能删除）
@@ -386,7 +388,7 @@ tail -f "$HOME/feishu-opencode-bridge/bridge.log"
 - `/agent`：回复 Agent 选择卡片，点击按钮切换
 - `/agent <序号>`：按 `/agent` 列表中的序号切换
 - `/agent <agent_id|名称>`：直接指定切换，例如 `/agent plan`
-- `/stop [序号|session_id]`：中止任务，默认当前会话；并清理该会话的待审批
+- `/stop [序号|session_id]`：中止任务，默认当前会话；并清理该会话的待审批和待回答提问
 - `/whoami`：显示 open_id / chat_id / session_id / 会话标题 / 当前模型 / 当前 Agent
 - 直接发送文本：在当前会话派任务
 - 当前没有会话时（例如刚执行 `/temp end`），直接发送文本会自动创建普通会话，标题取消息前 40 个字符
@@ -453,7 +455,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 - **模型卡和 Agent 卡按会话校验**：模型/Agent 切换会校验卡片所属会话，不能通过转发修改别人会话的模型或 Agent。
 - **白名单变更需要重启**：`FEISHU_ALLOWED_OPEN_IDS` 只在启动时读取，改完必须重启桥接器；飞书可用范围变更需要重新发布版本。
 - **移除白名单不会停止已有任务和定时任务**：白名单只拦截新的入站消息。已经在跑的任务会继续执行并把结果发到原聊天；已创建的定时任务到点仍会执行。移除前先 `/stop` 并清理该用户的定时任务。
-- **移除白名单后无法再审批**：该用户点击审批卡会被拒绝，正在等待审批的任务会在 30 分钟后自动拒绝并中止。
+- **移除白名单后无法再审批或回答提问**：该用户点击审批卡/提问卡会被拒绝，正在等待审批的任务会在 30 分钟后自动拒绝并中止；正在等待回答的提问会在 30 分钟后自动取消并中断任务。
 - **重新加入白名单会恢复原有数据**：历史会话、任务和定时任务没有删除，重新加入后仍可访问。
 - **成员离开企业**：其 `open_id` 留在白名单里不会产生新的访问（对方已无法使用应用），但历史会话、定时任务和数据库记录会保留；定时任务发送失败会记录日志。建议离开前清理其定时任务和会话。
 - **未在白名单的人收不到任何回复**：对方可能以为机器人坏了；建议同时收紧飞书可用范围，或在应用说明里写明使用范围。
@@ -461,6 +463,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 - **额度与密钥共享**：所有用户消耗同一个 OpenCode 服务配置的 API Key 和额度；一个用户的长任务或大输出会影响其他人。
 - **全局配置对所有人生效**：`BRIDGE_MAX_FINAL_CHARS`、`BRIDGE_TASK_TIMEOUT_SECONDS`、`OPENCODE_AGENT`、`OPENCODE_READONLY_AGENTS`、默认模型等不能按用户单独设置。
 - **审批超时**：10 分钟未处理发提醒，30 分钟自动拒绝并中止任务；提醒只发到任务发起人的私聊。
+- **提问超时**：5 分钟未处理发提醒，30 分钟自动取消并中断任务；提醒只发到任务发起人的私聊。
 - **桥接器或 OpenCode 重启影响所有人**：所有用户的未完成任务都会中断并收到通知；飞书接口限流也按应用计算，多人高频使用可能互相影响。
 - **只处理文本消息**：图片、文件、富文本等会收到「目前只支持文本消息」提示。
 
@@ -470,7 +473,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 
 - `/temp [标题]` 创建临时会话并切换过去；参数是标题，不会发给模型。之后发送的内容才会发给模型，可以继续多轮对话。
 - 临时会话使用独立空目录，默认位于 `$BRIDGE_DATA_DIR/temp`（默认 `$BRIDGE_HOME/temp`），创建 OpenCode 会话时作为工作目录传入。
-- 临时会话默认空闲 30 分钟后自动清理；任务执行中、有待审批时不会清理。
+- 临时会话默认空闲 30 分钟后自动清理；任务执行中、有待审批或待回答提问时不会清理。
 - 每次发送消息、提交任务、任务完成、`/switch` 进入临时会话都会重新计时。
 - 到期时如果临时会话是当前会话，会先清空当前会话，再删除 OpenCode 会话、临时目录和 SQLite 记录；之后发送任意消息会自动创建普通会话。
 - `/temp end` 立即结束当前临时会话；`/temp list` 查看临时会话、剩余时间和目录。
@@ -487,10 +490,10 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 
 - `/sessions` 太长时，可以用 `/delete <序号|session_id|标题>` 删除单个空闲会话。
 - `/clean` 会列出所有可删除的空闲会话（不含当前会话、不含正在执行任务的会话），再发送 `/clean confirm` 才会真正删除。
-- 删除会话会同时调用 OpenCode `DELETE /api/session/{sessionID}`，删除该会话及其子会话；SQLite 中的会话记录、任务记录和审批记录也会移除，删除后不可恢复。
+- 删除会话会同时调用 OpenCode `DELETE /api/session/{sessionID}`，删除该会话及其子会话；SQLite 中的会话记录、任务记录、审批记录和提问记录也会移除，删除后不可恢复。
 - 当前会话不能删除；如需删除，先 `/switch` 到其他会话。
 - 有任务正在执行的会话不能删除；先等待完成或 `/stop`。
-- 删除会话前会自动拒绝该会话的待审批请求。
+- 删除会话前会自动拒绝该会话的待审批请求，并取消待回答的提问。
 - 如果定时任务绑定的会话被删除，定时任务会在下次执行时自动创建新会话。
 
 ## 任务可靠性
@@ -500,6 +503,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 - 如果上报 `session.execution.interrupted`，任务会标记为已中止并通知。
 - 如果只上报 `session.error`，桥接器也会把当前任务标记失败并通知。
 - 后台每 60 秒对账一次：如果任务仍在执行但 OpenCode 已空闲，会读取会话的 `idle` 消息补发结果；SSE 断线期间错过的完成/失败事件可以自动恢复。
+- 任务正在等待用户回答提问时，对账会跳过该任务，由提问超时循环负责中断，避免把正常等待误判为卡死。
 - 任务超过 60 分钟仍未完成会自动中止并通知，避免一直卡在「执行中」。超时时间可通过 `BRIDGE_TASK_TIMEOUT_SECONDS` 调整。
 
 ## 定时任务
@@ -601,6 +605,30 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 - 任务完成后，原进度卡只收尾为「完成」，结果统一在聊天底部另发一张新结果卡。飞书更新卡片不会触发消息通知，只更新原卡容易让用户错过结果；审批卡也可能把结果压在更上方。
 - 桥接器重启时，未完成任务会标记失败、更新卡片并发送通知。
 
+## 提问（form）交互
+
+OpenCode 的 `question` 工具会创建 form，等待用户输入。桥接器把它转换成飞书卡片 2.0 表单，直接在聊天里填写和提交。
+
+- 收到 `form.created` 后发送「OpenCode 需要你的输入」表单卡；卡片包含任务摘要、问题标题/描述和对应输入组件。
+- 有选项的字段使用下拉框；`multiple: true` 使用多选；`custom: true` 额外提供一个「其他答案」输入框，填写后优先使用自定义值。
+- 布尔字段用「是/否」下拉框；数字/整数字段用输入框，由桥接器转换和校验，整数不接受小数。
+- 所有表单组件都不启用飞书前端必填校验，必填由桥接器在提交时校验，避免自定义答案被前端拦住；校验失败会返回 toast，不会关闭卡片。
+- 提交后调用 `POST /api/session/{sessionID}/form/{formID}/reply`，卡片更新为「提问已提交」并显示答案，任务继续执行。
+- 点击「取消提问」会调用 `DELETE /api/session/{sessionID}/form/{formID}`，取消 form、中断任务，并更新任务卡和表单卡。
+- 默认 5 分钟未处理发一次文字提醒，30 分钟未处理自动取消 form 并中断任务；表单卡会明确显示「提问已过期 / 任务已中断」。
+- 超时时间可通过 `BRIDGE_FORM_REMIND_SECONDS` / `BRIDGE_FORM_EXPIRE_SECONDS` 调整，设为 `0` 可关闭提醒或自动过期。
+- 后台每 30 秒轮询一次 form 接口兜底，SSE 断线时也能发现新提问和已回答/已取消状态。
+- 桥接器重启后，未完成任务会被标记失败；相关 form 会自动取消，卡片更新为失效状态并标明任务已中断。
+- `/stop`、`/delete` 和新任务提交都会取消该会话的待回答 form，避免 OpenCode 里留下悬挂请求；临时会话有待回答提问时不会被清理，等提问过期后再清理。
+- 当前任务正在等待回答时，新消息会提示先处理提问卡片或 `/stop`；`/sessions` 会显示「待回答 N」。
+
+限制：
+
+- 飞书卡片 2.0 的 `form` 容器只能放在根节点；桥接器已按此约束生成卡片。
+- 飞书 `input` 只支持文本/多行文本/密码，数字和布尔值由桥接器转换。
+- 自定义答案只对带选项的字符串/多选字段显示；纯文本字段本身就可以直接输入任意内容。
+- 表单卡只发到任务发起人的私聊，回调仍按白名单校验点击者。
+
 ## 配置
 
 - `$BRIDGE_HOME/bridge.env`（600，`BRIDGE_HOME` 默认是仓库根目录）
@@ -608,7 +636,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
   - 白名单 open_id（逗号分隔；留空表示不限制，多人共用见「[多人共用同一个机器人](#多人共用同一个机器人)」）
   - OpenCode 地址、用户名、密码
   - 工作目录、默认 Agent `OPENCODE_AGENT`、只读 Agent `OPENCODE_READONLY_AGENTS`、模型
-  - 进度间隔、审批提醒/超时、任务对账/超时、结果截断长度
+  - 进度间隔、审批提醒/超时、提问提醒/超时、任务对账/超时、结果截断长度
   - 临时会话空闲时长 `BRIDGE_TEMP_SESSION_TTL_SECONDS`（默认 1800 秒）
   - 临时工作目录根路径 `BRIDGE_TEMP_WORKSPACE_ROOT`（默认 `$BRIDGE_DATA_DIR/temp`）
   - 仓库中的 `bridge.env.example` 是变量模板，复制为 `bridge.env` 后填写
@@ -682,6 +710,12 @@ sudo systemctl start feishu-opencode-bridge@$USER
 - **审批卡不更新**
   - 必须在卡片回调响应里返回 `card: {"type": "raw", "data": <card>}`。
   - 回调处理期间单独调用 `PATCH /im/v1/messages/{id}` 会被忽略。
+- **提问卡没有出现 / 任务卡在等待输入**
+  - 确认 OpenCode 版本支持 form API：`GET /api/session/{sessionID}/form` 可访问。
+  - 查看日志中的 `form card sent`、`send form card failed`、`form poll failed`。
+  - 确认飞书已订阅 `card.action.trigger`，且 SSE `/api/event` 连接正常。
+  - 表单卡使用卡片 2.0，飞书客户端需要 7.20 及以上版本。
+  - 默认 30 分钟未处理会自动取消并中断任务；可调整 `BRIDGE_FORM_EXPIRE_SECONDS`。
 - **OpenCode 401**
   - 检查 `bridge.env` 的 `OPENCODE_PASSWORD`、`service.env` 的 `OPENCODE_SERVER_PASSWORD`、`service.json` 的 `password` 三者是否一致。
 - **`/agent` 获取列表失败或看不到自定义 Agent**

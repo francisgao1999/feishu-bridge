@@ -82,6 +82,8 @@ def main() -> None:
     lark_loop.create_task(bridge.sse_loop())
     lark_loop.create_task(bridge.permission_poll_loop())
     lark_loop.create_task(bridge.permission_expiry_loop())
+    lark_loop.create_task(bridge.form_poll_loop())
+    lark_loop.create_task(bridge.form_expiry_loop())
     lark_loop.create_task(bridge.schedule_loop())
     lark_loop.create_task(bridge.task_watchdog_loop())
     lark_loop.create_task(bridge.notify_stale_tasks())
