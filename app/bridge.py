@@ -2095,7 +2095,7 @@ class Bridge:
                     schedule["next_run_at"], SCHEDULE_TZ
                 ).strftime("%m-%d %H:%M")
                 lines.append(
-                    f"{schedule['id']}. {schedule['title']}  [{status}]"
+                    f"#{schedule['id']} {schedule['title']}  [{status}]"
                 )
                 lines.append(f"   {label} · {when}")
                 lines.append(
@@ -2121,7 +2121,7 @@ class Bridge:
                 schedule["weekday"],
             )
             lines.append(
-                f"{schedule['id']}. {schedule['title']}  [{status}]"
+                f"#{schedule['id']} {schedule['title']}  [{status}]"
             )
             lines.append(f"   {label} · 下次 {next_run}")
             lines.append(
@@ -2141,7 +2141,7 @@ class Bridge:
                     )
         lines.append("")
         lines.append(
-            "发送 /schedule pause|resume|remove|run <id> 管理。"
+            "发送 /schedule pause|resume|remove|run #<id> 管理。"
         )
         await self.feishu.send_text_async(chat_id, "\n".join(lines))
 
@@ -2150,11 +2150,11 @@ class Bridge:
     ) -> tuple[dict[str, Any] | None, str | None]:
         argument = argument.strip()
         if not argument:
-            return None, "请提供定时任务序号，例如：/schedule pause 1"
+            return None, "请提供定时任务编号，例如：/schedule pause 3"
         try:
             schedule_id = int(argument.split()[0])
         except ValueError:
-            return None, "定时任务序号必须是数字。"
+            return None, "定时任务编号必须是数字。"
         schedule = self.db.get_schedule(schedule_id)
         if not schedule or schedule["chat_id"] != chat_id:
             return None, f"未找到定时任务 #{schedule_id}。"
