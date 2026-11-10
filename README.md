@@ -118,19 +118,19 @@ python3.13 -m venv .venv
 cp bridge.env.example bridge.env
 chmod 600 bridge.env
 chmod +x backup.sh
-mkdir -p workspace/temp
+mkdir -p "$HOME/workspace/temp"
 ```
 
 编辑 `bridge.env`，至少填写 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_ALLOWED_OPEN_IDS`、`OPENCODE_PASSWORD`。路径默认值：
 
 - `BRIDGE_HOME` 默认是仓库根目录（`$HOME/feishu-opencode-bridge`）
-- `OPENCODE_DIRECTORY=$BRIDGE_HOME/workspace`
+- `OPENCODE_DIRECTORY=$BRIDGE_HOME/../workspace`（默认即 `$HOME/workspace`，与仓库同级）
 - `BRIDGE_DATA_DIR` 默认等于 `BRIDGE_HOME`
 - `BRIDGE_DB=$BRIDGE_DATA_DIR/bridge.db`
 - `BRIDGE_LOG=$BRIDGE_DATA_DIR/bridge.log`
 - `BRIDGE_TEMP_WORKSPACE_ROOT=$OPENCODE_DIRECTORY/temp`
 
-上面的 `mkdir -p workspace/temp` 已经创建了默认目录。如果 OpenCode 以其他用户运行，确保该用户也能读写 `$HOME/feishu-opencode-bridge/workspace` 和 `$HOME/feishu-opencode-bridge/workspace/temp`。
+上面的 `mkdir -p "$HOME/workspace/temp"` 已经创建了默认目录。如果 OpenCode 以其他用户运行，确保该用户也能读写 `$HOME/workspace` 和 `$HOME/workspace/temp`。
 
 GitHub 仓库中的源码位于 `app/`；systemd 以 `$HOME/feishu-opencode-bridge` 为工作目录，执行 `app/main.py`。
 
@@ -472,7 +472,7 @@ sudo systemctl restart feishu-opencode-bridge@$USER
 ## 临时会话
 
 - `/temp [标题]` 创建临时会话并切换过去；参数是标题，不会发给模型。之后发送的内容才会发给模型，可以继续多轮对话。
-- 临时会话使用独立空目录，默认位于 `$OPENCODE_DIRECTORY/temp`（默认 `$BRIDGE_HOME/workspace/temp`），创建 OpenCode 会话时作为工作目录传入。
+- 临时会话使用独立空目录，默认位于 `$OPENCODE_DIRECTORY/temp`（默认 `$BRIDGE_HOME/../workspace/temp`，即 `$HOME/workspace/temp`），创建 OpenCode 会话时作为工作目录传入。
 - 临时会话默认空闲 30 分钟后自动清理；任务执行中、有待审批或待回答提问时不会清理。
 - 每次发送消息、提交任务、任务完成、`/switch` 进入临时会话都会重新计时。
 - 到期时如果临时会话是当前会话，会先清空当前会话，再删除 OpenCode 会话、临时目录和 SQLite 记录；之后发送任意消息会自动创建普通会话。
@@ -656,7 +656,7 @@ OpenCode 的 `question` 工具会创建 form，等待用户输入。桥接器把
 | `BRIDGE_DB` | `$BRIDGE_DATA_DIR/bridge.db` | SQLite 数据库 |
 | `BRIDGE_LOG` | `$BRIDGE_DATA_DIR/bridge.log` | 日志文件 |
 | `BRIDGE_TEMP_WORKSPACE_ROOT` | `$OPENCODE_DIRECTORY/temp` | 临时会话目录 |
-| `OPENCODE_DIRECTORY` | `$BRIDGE_HOME/workspace` | 普通会话工作目录 |
+| `OPENCODE_DIRECTORY` | `$BRIDGE_HOME/../workspace` | 普通会话工作目录 |
 | `BRIDGE_BACKUP_DIR` | `$BRIDGE_HOME/backups` | 备份输出目录（仅 `backup.sh`） |
 
 优先级从高到低：**进程环境变量 > `bridge.env` > 默认值**。`BRIDGE_HOME` / `BRIDGE_DATA_DIR` 的完整优先级和相对路径规则见「[用户与路径](#用户与路径)」。
@@ -785,7 +785,7 @@ sudo systemctl enable --now feishu-opencode-bridge-backup@oc.timer
 | `BRIDGE_DB` | `$BRIDGE_DATA_DIR/bridge.db` | `$BRIDGE_DATA_DIR` |
 | `BRIDGE_LOG` | `$BRIDGE_DATA_DIR/bridge.log` | `$BRIDGE_DATA_DIR` |
 | `BRIDGE_TEMP_WORKSPACE_ROOT` | `$OPENCODE_DIRECTORY/temp` | `$BRIDGE_DATA_DIR` |
-| `OPENCODE_DIRECTORY` | `$BRIDGE_HOME/workspace` | `$BRIDGE_HOME` |
+| `OPENCODE_DIRECTORY` | `$BRIDGE_HOME/../workspace` | `$BRIDGE_HOME` |
 | `BRIDGE_BACKUP_DIR` | `$BRIDGE_HOME/backups` | `$BRIDGE_HOME`（仅 `backup.sh`） |
 
 注意：

@@ -36,11 +36,14 @@ class ConfigTest(unittest.TestCase):
         cfg = self.load()
         self.assertEqual(cfg.bridge_home, str(REPO_ROOT))
         self.assertEqual(cfg.data_dir, str(REPO_ROOT))
-        self.assertEqual(cfg.workspace_dir, str(REPO_ROOT / "workspace"))
+        self.assertEqual(
+            cfg.workspace_dir, str(REPO_ROOT.parent / "workspace")
+        )
         self.assertEqual(cfg.db_path, str(REPO_ROOT / "bridge.db"))
         self.assertEqual(cfg.log_path, str(REPO_ROOT / "bridge.log"))
         self.assertEqual(
-            cfg.temp_workspace_root, str(REPO_ROOT / "workspace" / "temp")
+            cfg.temp_workspace_root,
+            str(REPO_ROOT.parent / "workspace" / "temp"),
         )
         self.assertEqual(cfg.agent, "build")
         self.assertEqual(cfg.readonly_agents, frozenset({"plan"}))
@@ -53,11 +56,14 @@ class ConfigTest(unittest.TestCase):
             cfg = self.load(BRIDGE_HOME=str(home))
             self.assertEqual(cfg.bridge_home, str(home))
             self.assertEqual(cfg.data_dir, str(home))
-            self.assertEqual(cfg.workspace_dir, str(home / "workspace"))
+            self.assertEqual(
+                cfg.workspace_dir, str(home.parent / "workspace")
+            )
             self.assertEqual(cfg.db_path, str(home / "bridge.db"))
             self.assertEqual(cfg.log_path, str(home / "bridge.log"))
             self.assertEqual(
-                cfg.temp_workspace_root, str(home / "workspace" / "temp")
+                cfg.temp_workspace_root,
+                str(home.parent / "workspace" / "temp"),
             )
 
     def test_data_dir_override_and_relative_paths(self):
@@ -68,7 +74,8 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(cfg.db_path, str(home / "data" / "bridge.db"))
             self.assertEqual(cfg.log_path, str(home / "data" / "bridge.log"))
             self.assertEqual(
-                cfg.temp_workspace_root, str(home / "workspace" / "temp")
+                cfg.temp_workspace_root,
+                str(home.parent / "workspace" / "temp"),
             )
 
     def test_absolute_path_overrides(self):

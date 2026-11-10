@@ -116,8 +116,9 @@ def load_config() -> Config:
         if item.strip()
     )
 
+    # 默认与仓库同级：~/feishu-opencode-bridge 旁边是 ~/workspace。
     workspace_dir = _path(
-        "OPENCODE_DIRECTORY", bridge_home / "workspace", bridge_home
+        "OPENCODE_DIRECTORY", bridge_home.parent / "workspace", bridge_home
     )
 
     return Config(
