@@ -104,7 +104,9 @@ docker LXC（bridge 容器）
 
 按 [`docs/lxc-template-manual.md`](docs/lxc-template-manual.md) **手工**创建模板 LXC（VMID 900）。模板只创建一次，之后所有用户从它克隆。
 
-模板包含：Debian 最小系统 + `git`/`python3`/`curl`/`jq` 等约 40MB 工具、opencode 2.3.2、`/workspace`、`/workspace/uploads`、`/workspace/outbox`、`opencode-serve.service`、nftables 规则（仅放行 docker LXC 访问 4096）。
+模板包含：Debian 最小系统 + `git`/`python3`/`curl`/`jq` 等约 40MB 工具、opencode 2.3.2、`/workspace`、`/workspace/uploads`、`/workspace/outbox`、`opencode-serve.service`、nftables 规则（仅放行 docker LXC 访问 4096），以及**出站代理**配置：`/etc/opencode/proxy.env`（默认 `192.168.110.11:10808`，HTTP 与 SOCKS5 同端口）、apt/git/pip 的系统级代理、`/etc/profile.d/99-proxy.sh`。代理随模板克隆，每个用户 LXC 自动继承。
+
+工作区 `/workspace/AGENTS.md` 也包含「网络与代理」一节，告诉 opencode 出站走代理、各工具如何显式指定、哪些配置不要改。
 
 模板默认**不安装**数据库、Node.js、build-essential；用户需要时自行 `apt install`。
 

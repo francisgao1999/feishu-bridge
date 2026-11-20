@@ -52,8 +52,33 @@ apt-get install -y postgresql
 - 单条命令超过 10 分钟请分片执行，避免任务超时
 - 任务超时上限 7200 秒（2 小时）
 
+## 网络与代理
+
+容器不能直连外网，所有出站流量必须走代理。代理已经配置好，不要删改：
+
+- `HTTP_PROXY` / `HTTPS_PROXY`：`http://192.168.110.11:10808`
+- `ALL_PROXY`：`socks5h://192.168.110.11:10808`
+- `NO_PROXY`：`localhost`、`127.0.0.1` 和私有网段，内网直连
+
+opencode 服务启动时已注入这些变量，它执行的命令会自动继承，`curl`、`git`、`pip`、`npm` 一般不需要额外参数。
+
+如果某个工具不认环境变量，显式指定：
+
+```bash
+curl -x "$HTTPS_PROXY" https://example.com
+git -c http.proxy="$HTTPS_PROXY" clone https://github.com/xxx/yyy.git
+pip install --proxy "$HTTPS_PROXY" requests
+npm config set proxy "$HTTP_PROXY" --location=global
+```
+
+`apt` 已写入 `/etc/apt/apt.conf.d/99proxy`，直接 `apt install` 即可。
+
+- 不要在命令里写死代理地址，统一用 `$HTTP_PROXY` / `$HTTPS_PROXY` / `$ALL_PROXY`
+- 不要把代理变量清空或 `unset`；确需直连内网时用 `NO_PROXY`
+- 代理配置属于管理员维护，修改请找管理员改 `/etc/opencode/proxy.env`
+
 ## 不要做的事
 
-- 不要修改 `/etc/opencode/` 下的配置
+- 不要修改 `/etc/opencode/` 下的配置（含 `proxy.env`）
 - 不要关闭或重启 `opencode-serve` 服务
 - 不要删除 `/workspace/uploads/` 和 `/workspace/outbox/`

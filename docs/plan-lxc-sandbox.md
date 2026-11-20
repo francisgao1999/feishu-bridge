@@ -119,9 +119,10 @@ bridge 不访问 Docker，也不需要任何宿主目录。
 | `.dockerignore` | 排除 `.venv`、`tests`、`backups`、`data`、`*.db`、`*.log`、`debug` |
 | `docker-compose.yml` | 只含 bridge 一个 service；`env_file: ./bridge.env`；挂载 `./config:/app/config:ro`、`./data:/app/data` |
 | `config/users.json.example` | 用户映射样例（`users.json` 本身不提交） |
-| `deploy/lxc/opencode-serve.service` | 用户 LXC 内的 systemd 单元（`EnvironmentFile=/etc/opencode/serve.env`，监听 `0.0.0.0:4096`） |
+| `deploy/lxc/opencode-serve.service` | 用户 LXC 内的 systemd 单元（`EnvironmentFile` 依次加载 `proxy.env` / `service.env` / `serve.env`，监听 `0.0.0.0:4096`） |
+| `deploy/lxc/proxy.env.example` | 出站代理（生产 `192.168.110.11:10808`，HTTP 与 SOCKS5 同端口），安装为 `/etc/opencode/proxy.env` |
 | `deploy/lxc/opencode.jsonc` | 用户 LXC 内的 opencode 配置模板（providers/agents/MCP，**不含 `dbx`**） |
-| `deploy/lxc/workspace-AGENTS.md` | 投放到 `/workspace/AGENTS.md` 的工作区约定（`apt install -y`、超时分片、outbox 用法） |
+| `deploy/lxc/workspace-AGENTS.md` | 投放到 `/workspace/AGENTS.md` 的工作区约定（`apt install -y`、超时分片、outbox 用法、网络与代理） |
 | `deploy/lxc/add-user.sh` | 克隆 LXC、写入 IP 与 serve.env、更新 `users.json`、`pct push` 到 docker LXC、跑冒烟 |
 | `deploy/lxc/remove-user.sh` | 停用/归档用户 LXC 并从 `users.json` 移除 |
 | `docs/lxc-template-manual.md` | **模板 LXC 手工创建教程**：逐步命令、软件包清单、systemd、nftables、就绪标记、冒烟 |
@@ -286,6 +287,8 @@ OPENCODE_PASSWORD=<与 users.json 一致>
 - 默认软件包清单见 §9.1（可裁剪）
 - 模板上配置 nftables：仅允许 docker LXC 的 IP 访问 4096
 - 模板放置就绪标记 `/etc/opencode/ready`，供 `add-user.sh` 等待
+- 出站代理统一由模板注入：`/etc/opencode/proxy.env`（`HTTP_PROXY`/`HTTPS_PROXY` = `http://192.168.110.11:10808`，`ALL_PROXY` = `socks5h://192.168.110.11:10808`，600），systemd 单元通过 `EnvironmentFile` 注入 opencode 进程；另有 `/etc/profile.d/99-proxy.sh`、`/etc/apt/apt.conf.d/99proxy`、`git --system` 与 `/etc/pip.conf`，保证 `pct exec` 和登录 shell 都能出站。`NO_PROXY` 覆盖 `localhost`、`127.0.0.1` 与私有网段。代理配置随克隆复制，`add-user.sh` 只验证不改写
+- `/workspace/AGENTS.md` 写明代理用法：优先使用 `$HTTP_PROXY`/`$HTTPS_PROXY`/`$ALL_PROXY`，不写死地址、不清空变量、不改 `/etc/opencode/proxy.env`
 - `/etc/opencode/serve.env`（`OPENCODE_PASSWORD`，600）与 `/etc/opencode/service.env`（模型 API Key 等，600）随模板克隆复制；信任模型下可接受，用户量扩大后再改按用户下发
 
 ### 6.7 审批放宽
@@ -811,6 +814,8 @@ docker compose logs -f
 - [ ] 入站超限（>100MB）时提示拆分或改用链接
 - [ ] `rm -rf` 仍触发审批，`sudo`/`service` 不再触发
 - [ ] `/temp` 相关命令与文档已移除
+- [ ] 用户 LXC 出站走代理：`/etc/opencode/proxy.env` 生效，`bash -lc 'curl https://api.github.com'` 返回 200
+- [ ] `/workspace/AGENTS.md` 含「网络与代理」一节
 - [ ] `scripts/smoke-test.sh` 与 `/smoke` 均通过
 - [ ] `AGENTS.md` 含强制冒烟测试条款
 - [ ] 单测、compileall、`bash -n`、`git diff --check` 全部通过

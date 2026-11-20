@@ -222,6 +222,24 @@ if [ "$HEALTHY" -ne 1 ]; then
   exit 1
 fi
 
+# 模板里的代理配置随克隆带过来；这里只验证，不修改。
+if [ "$DRY_RUN" -eq 0 ]; then
+  info "验证出站代理"
+  if pct exec "$NEXT_ID" -- test -f /etc/opencode/proxy.env 2>/dev/null; then
+    if pct exec "$NEXT_ID" -- bash -lc \
+      'curl -fsS --max-time 10 -o /dev/null https://api.github.com' 2>/dev/null; then
+      echo "    出站代理正常"
+    else
+      echo "警告：出站代理不可用，opencode 可能无法访问模型服务。" >&2
+      echo "      排查：pct exec $NEXT_ID -- bash -lc 'env | grep -i proxy'" >&2
+      echo "            pct exec $NEXT_ID -- cat /etc/opencode/proxy.env" >&2
+    fi
+  else
+    echo "警告：模板缺少 /etc/opencode/proxy.env，用户 LXC 将无法出站。" >&2
+    echo "      按 docs/lxc-template-manual.md §1.1 重建模板。" >&2
+  fi
+fi
+
 # --- 更新 users.json -------------------------------------------------------
 info "更新 docker LXC 内的 users.json"
 if [ "$DRY_RUN" -eq 0 ]; then

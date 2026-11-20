@@ -32,6 +32,8 @@ export TEMPLATE_IP="10.0.0.9"     # 模板 LXC 自己的临时 IP（创建期用
 export GATEWAY="10.0.0.1"
 export BRIDGE="vmbr0"
 export PREFIX="24"                # 按实际网段填写，下面所有 /24 都要一起改
+export PROXY_HOST="192.168.110.11" # 代理所在主机（生产环境就是 docker LXC 的 IP）
+export PROXY_PORT="10808"          # HTTP 与 SOCKS5 同端口
 ```
 
 > 教程里的 `/24` 是示例。如果你的网段是 `/16` 或 `/25`，把 `$PREFIX` 改成实际值，并把下面命令中的 `/24` 替换为 `/$PREFIX`。
@@ -64,6 +66,53 @@ pct create 900 "$TMPL" \
 - `--start 1`：创建后立即启动，方便安装。
 
 如果 `local-lvm` 不存在，用 `pvesm status` 查实际存储名替换。
+
+### 1.1 配置出站代理（安装软件前）
+
+生产环境用户 LXC 不能直连外网，所有出站流量走 docker LXC 上的代理（HTTP 与 SOCKS5 同为 `10808`）。**先配代理，再 `apt install` 和下载 opencode**，否则后半段会卡住。
+
+```bash
+pct push 900 deploy/lxc/proxy.env.example /etc/opencode/proxy.env
+pct exec 900 -- env PROXY_HOST="$PROXY_HOST" PROXY_PORT="$PROXY_PORT" bash -c '
+set -e
+# 统一改成实际代理地址（示例文件默认 192.168.110.11）
+sed -i "s/192\.168\.110\.11/$PROXY_HOST/g" /etc/opencode/proxy.env
+chmod 600 /etc/opencode/proxy.env
+
+# 登录 shell 自动加载代理变量（/etc/opencode/proxy.env 是唯一来源）
+cat > /etc/profile.d/99-proxy.sh <<"EOF"
+# 出站代理，由模板预置；不要手工 export，改 /etc/opencode/proxy.env 即可
+if [ -r /etc/opencode/proxy.env ]; then
+    set -a
+    . /etc/opencode/proxy.env
+    set +a
+fi
+EOF
+chmod 644 /etc/profile.d/99-proxy.sh
+
+# apt 不读环境变量，单独配置
+cat > /etc/apt/apt.conf.d/99proxy <<EOF
+Acquire::http::Proxy "http://$PROXY_HOST:$PROXY_PORT";
+Acquire::https::Proxy "http://$PROXY_HOST:$PROXY_PORT";
+EOF
+'
+```
+
+验证代理可用（`pct exec` 默认没有环境变量，用 `bash -l` 才会加载 `/etc/profile.d/99-proxy.sh`）：
+
+```bash
+pct exec 900 -- bash -lc 'env | grep -i proxy'
+pct exec 900 -- bash -lc 'curl -fsS -o /dev/null -w "%{http_code}\n" https://api.github.com'
+# 期望输出 200
+```
+
+说明：
+
+- `opencode-serve.service` 里有 `EnvironmentFile=-/etc/opencode/proxy.env`，opencode 及其启动的所有命令都会继承代理变量。
+- 代理配置随模板克隆，**每个用户 LXC 自动带上**，`add-user.sh` 不需要再写。
+- `NO_PROXY` 已包含 `localhost`、`127.0.0.1` 和私有网段，内网访问不绕代理。
+- 有额外需要直连的域名时，往 `NO_PROXY` 里追加具体域名即可；不要删除 `127.0.0.1`（opencode 依赖回环通信）。
+- `git` / `pip` 的系统级代理在 §2 装完软件后再写（此时 `git` 才存在）。
 
 ---
 
@@ -110,6 +159,23 @@ rm -rf /var/lib/apt/lists/*
 
 **不安装**：`nodejs`/`npm`、`build-essential`、`postgresql-client`、`default-mysql-client`、`ripgrep`、`fonts-noto-cjk`。需要时由用户任务自己 `apt install`。
 
+装完 `git` 后，再补系统级代理（`pct exec` 不加载 `/etc/profile.d`，所以写进配置文件而不是依赖环境变量）：
+
+```bash
+pct exec 900 -- bash -lc '
+set -e
+git config --system http.proxy "$HTTP_PROXY"
+git config --system https.proxy "$HTTPS_PROXY"
+mkdir -p /etc
+cat > /etc/pip.conf <<EOF
+[global]
+proxy = $HTTP_PROXY
+EOF
+'
+```
+
+> `bash -lc` 会加载 `/etc/profile.d/99-proxy.sh`，因此这里能直接引用 `$HTTP_PROXY` / `$HTTPS_PROXY`。
+
 ---
 
 ## 3. 安装 opencode 2.3.2
@@ -117,13 +183,15 @@ rm -rf /var/lib/apt/lists/*
 固定版本，避免升级破坏 `fs/write` 等 experimental 接口。
 
 ```bash
-pct exec 900 -- bash -c '
+pct exec 900 -- bash -lc '
 set -e
 curl -fsSL https://opencode.ai/install | bash -s -- --version 2.3.2
 install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode
 /usr/local/bin/opencode --version
 '
 ```
+
+> 这里用 `bash -lc`（登录 shell）是为了加载 `/etc/profile.d/99-proxy.sh`，让下载走代理；`bash -c` 不会读该文件。
 
 预期输出：`2.3.2`。
 
@@ -201,11 +269,15 @@ pct exec 900 -- /usr/local/bin/opencode debug config
 
 输出里的 `config` 路径应为 `/etc/opencode/opencode/opencode.jsonc`。若不同，按实际路径调整。
 
+> 克隆使用 `pct clone --full`，模板里的 `opencode.jsonc`、`/workspace/AGENTS.md`、`/etc/opencode/proxy.env` 会**完整复制**到每个用户 LXC，不是每次新建。反过来，模板改完后**不会**同步到已开通的用户，需要逐台 `pct exec` 下发或重建 LXC。
+
 ### 4.3 写入工作区约定
 
 ```bash
 pct push 900 deploy/lxc/workspace-AGENTS.md /workspace/AGENTS.md
 ```
+
+该文件已包含「网络与代理」一节，告诉 opencode 出站必须走代理、各工具如何显式指定代理、哪些配置不要改。**不要**为了省事删掉这一段，否则 agent 遇到外网工具时会自己改配置。
 
 ### 4.4 写入模型密钥（可选）
 
@@ -276,6 +348,16 @@ pct exec 900 -- systemctl status opencode-serve --no-pager
 pct exec 900 -- curl -fsS http://127.0.0.1:4096/global/health
 ```
 
+确认服务进程真的拿到了代理变量（`EnvironmentFile=-/etc/opencode/proxy.env`）：
+
+```bash
+pct exec 900 -- systemctl show opencode-serve -p Environment \
+  | tr ' ' '\n' | grep -i proxy
+# 应能看到 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
+pct exec 900 -- bash -lc 'curl -fsS -o /dev/null -w "%{http_code}\n" https://api.github.com'
+# 期望 200；失败说明代理不通，先查 1.1
+```
+
 从宿主机验证鉴权（需要 `serve.env` 里的密码；模板期还没写密码，先手工写一个临时密码）：
 
 ```bash
@@ -339,6 +421,9 @@ pct template 900
 - [ ] `pct exec 900` 已不可用（模板不能启动）
 - [ ] 克隆测试：`pct clone 900 999 --full && pct start 999`，容器内 `/etc/opencode/ready` 存在
 - [ ] 克隆测试后删除：`pct stop 999 && pct destroy 999`
+- [ ] `/etc/opencode/proxy.env` 存在、权限 600，`systemctl show opencode-serve -p Environment` 能看到代理变量
+- [ ] `bash -lc 'curl https://api.github.com'` 返回 200
+- [ ] `/workspace/AGENTS.md` 含「网络与代理」一节
 - [ ] 冒烟测试通过（模板期已跑）
 
 ---
@@ -353,6 +438,9 @@ pct template 900
 | 配置不生效 | 读的不是 `/etc/opencode/...` | `opencode debug config` 看实际路径 |
 | 磁盘满 | 用户装了数据库 | `pct resize <vmid> rootfs 32G` |
 | 内存不够 | 同时跑 PG + MySQL | `pct set <vmid> --memory 3072` |
+| `curl` / `apt` 超时 | 代理没配或地址错 | `pct exec 900 -- bash -lc 'env \| grep -i proxy'`；检查 `/etc/opencode/proxy.env`、`/etc/apt/apt.conf.d/99proxy` |
+| opencode 调用模型超时 | 服务没拿到代理变量 | `systemctl show opencode-serve -p Environment \| tr ' ' '\n' \| grep -i proxy`；确认单元里有 `EnvironmentFile=-/etc/opencode/proxy.env` |
+| agent 自己 `unset` 代理后外网失败 | 工作区约定被改 | 重新 `pct push` `deploy/lxc/workspace-AGENTS.md` |
 
 ---
 

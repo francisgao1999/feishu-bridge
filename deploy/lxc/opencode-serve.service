@@ -14,6 +14,7 @@ Environment=XDG_DATA_HOME=/var/lib/opencode
 Environment=XDG_STATE_HOME=/var/lib/opencode/state
 Environment=XDG_CACHE_HOME=/var/cache/opencode
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/opencode/proxy.env
 EnvironmentFile=-/etc/opencode/service.env
 EnvironmentFile=-/etc/opencode/serve.env
 ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --port 4096 --print-logs --log-level info

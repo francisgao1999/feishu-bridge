@@ -61,8 +61,9 @@ cd /root/feishu-opencode-bridge          # 仓库目录（在 PVE 宿主上）
 9. 生成 24 字节随机密码，写入 `/etc/opencode/serve.env`
 10. `systemctl enable --now opencode-serve`
 11. 等待 `/global/health` 通过（最长约 60 秒）
-12. 更新 docker LXC 内的 `users.json`（备份为 `.bak`）
-13. 跑 `scripts/smoke-test.sh`
+12. 验证出站代理（`/etc/opencode/proxy.env` + `curl` 探测；失败只告警，不中断）
+13. 更新 docker LXC 内的 `users.json`（备份为 `.bak`）
+14. 跑 `scripts/smoke-test.sh`
 
 ### 1.4 失败处理
 
@@ -80,6 +81,7 @@ pct stop <vmid> && pct destroy <vmid>
 | `slug 已存在` | `users.json` 里已有 | 先 `remove-user.sh`，或换 slug |
 | `等待就绪标记超时` | 模板没写 `/etc/opencode/ready` | 按 `docs/lxc-template-manual.md` 重建模板 |
 | `健康检查超时` | opencode 启动失败 | `pct exec <vmid> -- journalctl -u opencode-serve -n 50 --no-pager` |
+| `出站代理不可用`（警告） | 模板没配代理，或代理地址错 | 按 `docs/lxc-template-manual.md` §1.1 检查 `/etc/opencode/proxy.env` |
 | `冒烟测试失败` | 网络/鉴权/接口问题 | 按冒烟输出逐项排查 |
 
 ### 1.5 幂等与安全
@@ -88,6 +90,26 @@ pct stop <vmid> && pct destroy <vmid>
 - 密码只写入 LXC，不打印到 stdout（脚本末尾打印的密码除外，用于交接）。
 - `users.json` 更新前自动备份为 `users.json.bak`。
 - `--dry-run` 可以先看完整命令序列。
+
+### 1.6 代理
+
+用户 LXC 的出站代理由**模板**提供，克隆时原样复制，脚本不会再写：
+
+- `/etc/opencode/proxy.env`：`HTTP_PROXY` / `HTTPS_PROXY` = `http://192.168.110.11:10808`，`ALL_PROXY` = `socks5h://...`，600
+- `opencode-serve.service` 通过 `EnvironmentFile` 注入 opencode 进程
+- `/etc/profile.d/99-proxy.sh`、`/etc/apt/apt.conf.d/99proxy`、git 系统配置、`/etc/pip.conf`
+
+脚本在第 12 步会验证：`/etc/opencode/proxy.env` 是否存在、`bash -lc 'curl https://api.github.com'` 是否通。失败只告警，不中断开通。
+
+手工复核：
+
+```bash
+pct exec <vmid> -- cat /etc/opencode/proxy.env
+pct exec <vmid> -- bash -lc 'env | grep -i proxy'
+pct exec <vmid> -- bash -lc 'curl -fsS -o /dev/null -w "%{http_code}\n" https://api.github.com'
+```
+
+模板里没有代理配置时，按 `docs/lxc-template-manual.md` §1.1 重建模板；已有用户需要手工补配置或重建 LXC。
 
 ---
 
