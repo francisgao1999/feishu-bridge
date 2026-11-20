@@ -1,35 +1,52 @@
 # AGENTS.md
 
-本文件是本项目的 Agent 工作约定。所有在本仓库工作的 Agent 都必须遵守，尤其是「测试通过后自动推送并部署生产」的流程。
+本文件是本项目的 Agent 工作约定。所有在本仓库工作的 Agent 都必须遵守，尤其是「测试通过后自动推送并部署生产」和「升级 opencode 必须跑冒烟测试」两条强制流程。
 
 ## 1. 项目概览
 
-飞书 ↔ OpenCode 桥接器：通过飞书长连接接收消息和卡片回调，调用本机 OpenCode V2 HTTP API 执行编码任务，并把进度、审批、提问和结果发回飞书。
+飞书 ↔ OpenCode 桥接器（多用户 LXC 版）：通过飞书长连接接收消息和卡片回调，按 `open_id` 把任务路由到对应用户的 PVE LXC，调用该 LXC 内的 OpenCode V2 HTTP API 执行编码任务，并把进度、审批、提问、结果和文件回传飞书。
 
 - 语言：Python 3.13
 - 主要依赖：`httpx`、`httpx-sse`、`lark-oapi`
 - 入口：`app/main.py`
 - 测试：`tests/`
-- systemd 模板：`deploy/`
-- 运行数据（**禁止提交**）：`bridge.env`、`bridge.db`、`bridge.log`、`backups/`、`temp/`
+- 容器：`Dockerfile` + `docker-compose.yml`
+- 用户 LXC 模板与脚本：`deploy/lxc/`
+- 冒烟测试：`scripts/smoke-test.sh`
+- 运行数据（**禁止提交**）：`bridge.env`、`config/users.json`、`data/`、`backups/`、`*.db`、`*.log`
+
+### 架构
+
+```
+飞书 → bridge 容器（docker LXC） → users.json 路由 → 用户 LXC 的 opencode serve
+```
+
+- 每用户一个 PVE LXC，非特权容器，宿主映射 100000。
+- 用户 LXC 内以 root 运行 `opencode serve --hostname 0.0.0.0 --port 4096`。
+- 用户 LXC 不开放 SSH / code-server / ttyd。
+- bridge 不持有 PVE API Token，不调用 `pct`；**创建 LXC 永远由管理员手工执行**。
 
 ### 代码结构
 
 | 路径 | 作用 |
 | --- | --- |
-| `app/main.py` | 进程入口、事件循环、任务调度 |
-| `app/bridge.py` | 飞书消息与 OpenCode 任务桥接 |
-| `app/feishu.py` | 飞书 API / 长连接封装 |
+| `app/main.py` | 进程入口、事件循环、按用户启动 SSE |
+| `app/bridge.py` | 飞书消息与 OpenCode 任务桥接、文件/图片收发、outbox |
+| `app/feishu.py` | 飞书 API / 长连接 / 文件上传下载 |
 | `app/forms.py` | 提问表单卡构建与答案转换 |
-| `app/opencode.py` | OpenCode V2 API 客户端 |
+| `app/opencode.py` | OpenCode V2 客户端、多用户路由、文件投递 |
+| `app/users.py` | `users.json` 解析与 mtime 热加载 |
 | `app/cards.py` | 飞书卡片构建与更新 |
-| `app/permissions.py` | 审批与只读 Agent 规则 |
-| `app/slash_commands.py` | `/help`、`/status`、`/new` 等命令 |
+| `app/permissions.py` | 审批与只读 Agent 规则、沙箱模式 |
+| `app/slash_commands.py` | `/help`、`/status`、`/smoke` 等命令 |
 | `app/db.py` | SQLite 初始化、迁移与读写 |
 | `app/config.py` | 环境变量与 `bridge.env` 加载 |
 | `app/ws_patch.py` | 飞书 WebSocket 补丁 |
-| `backup.sh` | 数据库、配置和源码备份 |
-| `deploy/` | systemd unit / timer 模板 |
+| `backup.sh` | 数据库、配置、`users.json` 和源码备份 |
+| `Dockerfile` / `docker-compose.yml` | bridge 容器 |
+| `deploy/lxc/` | 用户 LXC 的 systemd unit、配置、增删脚本 |
+| `scripts/smoke-test.sh` | 冒烟测试 |
+| `docs/` | 设计计划、模板教程、脚本手册 |
 | `debug/` | 独立调试脚本，不参与生产运行 |
 
 ## 2. 开发环境
@@ -48,6 +65,7 @@ export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
 - 下载依赖走本机代理 `127.0.0.1:10808`。
 - `lark_oapi` 在 `/mnt/d`（9p 文件系统）上首次导入可能较慢，测试请给足超时，不要误判为卡死。
 - `.venv/` 已在 `.gitignore` 中，不要提交。
+- 本机不装 Docker 也可以跑单测；构建镜像和部署在 docker LXC 上执行。
 
 ## 3. 测试与检查（发布前必须全部通过）
 
@@ -57,6 +75,9 @@ export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
 .venv/bin/python -m unittest discover -s tests -t . -v
 .venv/bin/python -m compileall -q app debug tests
 bash -n backup.sh
+bash -n deploy/lxc/add-user.sh
+bash -n deploy/lxc/remove-user.sh
+bash -n scripts/smoke-test.sh
 git diff --check
 ```
 
@@ -66,13 +87,36 @@ git diff --check
 - 新增功能或修复 bug 时，应补充对应测试。
 - 不要为了通过测试而删除、跳过或弱化已有测试。
 
+### 冒烟测试（强制）
+
+以下场景**必须**执行冒烟测试，失败即停止发布：
+
+1. 变更 opencode 版本（模板或用户 LXC）
+2. 重建模板 LXC 或克隆新用户
+3. 升级 bridge 镜像且涉及 `app/opencode.py`、`app/feishu.py`、`app/bridge.py` 的文件投递逻辑
+4. 部署后首次验证
+
+执行方式：
+
+```bash
+# 服务器侧（docker LXC 内）
+scripts/smoke-test.sh --users config/users.json
+
+# 或者飞书里
+/smoke
+```
+
+`scripts/smoke-test.sh` 逐用户验证：`/global/health`、Basic 认证、`fs/write` 2MB 二进制、`fs/read` sha256、`/api/event` SSE。
+
+**不得跳过、不得只测一个用户、不得只看 bridge 日志就认为通过。**
+
 ## 4. 提交规范
 
 - 使用 Conventional Commits：`feat:`、`fix:`、`docs:`、`test:`、`refactor:`、`chore:`。
 - 提交信息用中文描述具体变更，例如：`fix: 定时任务列表用 #id 显示`。
 - 一个提交只做一件事，避免把无关改动混在一起。
-- 提交前检查 `git status` 和 `git diff`，确认没有误提交密钥、数据库、日志或备份。
-- **禁止**提交 `bridge.env`、`service.env`、`*.db`、`*.log`、`backups/`、`temp/`、`.venv/`。
+- 提交前检查 `git status` 和 `git diff`，确认没有误提交密钥、数据库、日志、备份或 `users.json`。
+- **禁止**提交 `bridge.env`、`service.env`、`config/users.json`、`data/`、`*.db`、`*.log`、`backups/`、`temp/`、`.venv/`。
 
 ## 5. 自动推送与部署（强制流程）
 
@@ -89,6 +133,9 @@ git diff
 .venv/bin/python -m unittest discover -s tests -t . -v
 .venv/bin/python -m compileall -q app debug tests
 bash -n backup.sh
+bash -n deploy/lxc/add-user.sh
+bash -n deploy/lxc/remove-user.sh
+bash -n scripts/smoke-test.sh
 git diff --check
 
 # 3. 提交并推送
@@ -108,12 +155,12 @@ ssh oc.vm.pve          # 局域网环境（192.168.110.x 网段）
 
 > 真实 HostName、端口、用户名和私钥路径保存在本机 `~/.ssh/config`，**不要**写入仓库或提交到 GitHub。
 
-登录后执行：
+登录后进入 bridge 安装目录（docker LXC 内）：
 
 ```bash
-cd "$HOME/feishu-opencode-bridge"
+cd /opt/feishu-bridge
 
-# 1. 先备份数据库和 bridge.env
+# 1. 先备份数据库、users.json 和 bridge.env
 ./backup.sh
 
 # 2. 确认工作区干净；有输出说明服务器有未提交修改，先停下确认来源
@@ -122,15 +169,13 @@ git status --short
 # 3. 只允许快进拉取
 git pull --ff-only
 
-# 4. 更新依赖（每次都执行也安全；服务器网络慢时先加载代理）
-.venv/bin/pip install -r requirements.txt
+# 4. 重建镜像并重启容器
+docker compose build
+docker compose up -d
 
-# 5. 重启桥接器
-sudo systemctl restart feishu-opencode-bridge@oc
-
-# 6. 验证
-systemctl is-active feishu-opencode-bridge@oc
-sudo journalctl -u feishu-opencode-bridge@oc -n 50 --no-pager
+# 5. 验证
+docker compose ps
+docker compose logs --tail 80 bridge
 ```
 
 如果服务器直连 GitHub 较慢：
@@ -145,17 +190,19 @@ git pull --ff-only
 
 ### 5.3 部署范围
 
-- 修改了 `app/`、`deploy/`、`requirements.txt`、`backup.sh`：必须拉取、安装依赖并重启服务。
-- 纯文档变更（如 `README.md`、`AGENTS.md`、`todo.md`）：仍需 push；生产服务器执行 `git pull --ff-only` 保持同步即可，可不重启。
+- 修改了 `app/`、`requirements.txt`、`Dockerfile`、`docker-compose.yml`：必须 `docker compose build && docker compose up -d`。
+- 修改了 `scripts/`、`deploy/lxc/`、`docs/`：仍需 push；服务器 `git pull --ff-only` 保持同步即可，不需要重建镜像。用户 LXC 内的脚本/配置变更需要管理员手工下发。
+- 纯文档变更（`README.md`、`AGENTS.md`、`todo.md`、`docs/`）：仍需 push；生产服务器执行 `git pull --ff-only` 保持同步即可，可不重启。
 - 数据库结构由 `app/db.py` 在启动时自动迁移；升级前 `./backup.sh` 必须成功。
+- **不要**在服务器上执行 `pct` 创建/删除 LXC；创建 LXC 永远由管理员手工执行。
 
 ### 5.4 异常处理
 
 - 测试失败：停止，不提交、不推送、不部署。
 - `git push` 失败（认证/网络）：报告错误，不要强推，不要改写历史。
 - 服务器 `git status --short` 有输出：停止部署，先确认服务器上的修改是否需要保留；**禁止**直接 `git reset --hard`。
-- `git pull --ff-only` 分叉：先看 `git log --oneline --graph --decorate -10`，按 README「更新与同步」处理。
-- 部署后服务未启动：查看 `journalctl`，必要时回滚并报告。
+- `git pull --ff-only` 分叉：先看 `git log --oneline --graph --decorate -10`，按 README「从旧版单用户升级」处理。
+- 部署后容器未启动：查看 `docker compose logs`，必要时回滚并报告。
 - **禁止** `git push --force` 到 `main`。
 
 ### 5.5 完成后汇报
@@ -163,8 +210,8 @@ git pull --ff-only
 向用户简要汇报：
 
 1. 本次提交的 commit hash 和提交信息；
-2. 测试结果；
-3. 生产服务器是否已拉取、服务是否 `active`；
+2. 测试结果（含冒烟测试是否执行）；
+3. 生产服务器是否已拉取、容器是否 `Up`；
 4. 如有异常，说明卡在哪一步以及当前状态。
 
 ## 6. 生产服务器信息
@@ -174,23 +221,35 @@ git pull --ff-only
 | SSH 别名（公网） | `oc.vm.pve_hzdd` |
 | SSH 别名（局域网） | `oc.vm.pve` |
 | 运行用户 | `oc` |
-| 安装目录 | `/home/oc/feishu-opencode-bridge` |
-| 桥接器服务 | `feishu-opencode-bridge@oc` |
-| OpenCode 服务 | `opencode-serve`（监听 `127.0.0.1:4096`） |
-| Python 虚拟环境 | `/home/oc/feishu-opencode-bridge/.venv` |
-| 配置/密钥 | `/home/oc/feishu-opencode-bridge/bridge.env`（仅服务器本地） |
-| 数据库 | `/home/oc/feishu-opencode-bridge/bridge.db` |
-| 日志 | `journalctl -u feishu-opencode-bridge@oc` |
-| 备份 | `cd ~/feishu-opencode-bridge && ./backup.sh`，输出到 `backups/` |
+| 安装目录 | `/opt/feishu-bridge`（docker LXC 内） |
+| bridge 容器 | `feishu-bridge`（`docker compose`） |
+| 用户映射 | `/opt/feishu-bridge/config/users.json`（仅服务器本地） |
+| 配置/密钥 | `/opt/feishu-bridge/bridge.env`（仅服务器本地） |
+| 数据库 | `/opt/feishu-bridge/data/bridge.db` |
+| 日志 | `docker compose logs -f bridge` |
+| 备份 | `cd /opt/feishu-bridge && ./backup.sh`，输出到 `backups/` |
+| 模板 LXC | VMID 900，`oc-template` |
+| docker LXC | VMID 100 |
+| 用户 LXC | 从 101 开始，按 `oc-<slug>` 命名 |
 | sudo | 用户 `oc` 已配置 `NOPASSWD: ALL` |
 
 常用运维命令：
 
 ```bash
-sudo systemctl status feishu-opencode-bridge@oc --no-pager
-sudo systemctl restart feishu-opencode-bridge@oc
-sudo journalctl -u feishu-opencode-bridge@oc -f
-sudo systemctl status opencode-serve --no-pager
+cd /opt/feishu-bridge
+docker compose ps
+docker compose logs -f bridge
+docker compose restart bridge
+docker compose up -d --build
+```
+
+用户 LXC 运维（在 PVE 宿主执行）：
+
+```bash
+pct list
+pct status 101
+pct enter 101
+journalctl -u opencode-serve -n 50 --no-pager   # 在 LXC 内
 ```
 
 ## 7. 回滚
@@ -209,10 +268,10 @@ git push origin main
 紧急情况下可在服务器临时切到上一个可用提交：
 
 ```bash
-cd "$HOME/feishu-opencode-bridge"
+cd /opt/feishu-bridge
 git log --oneline -10
 git checkout <good-commit>
-sudo systemctl restart feishu-opencode-bridge@oc
+docker compose up -d --build
 ```
 
 确认修复后切回 `main` 并重新拉取：
@@ -220,21 +279,38 @@ sudo systemctl restart feishu-opencode-bridge@oc
 ```bash
 git checkout main
 git pull --ff-only
-sudo systemctl restart feishu-opencode-bridge@oc
+docker compose up -d --build
 ```
 
-数据库回滚：先停服务，按 README「备份与恢复」恢复 `bridge.db`，再启动。
+数据库回滚：先停容器，按 README「备份与恢复」恢复 `data/bridge.db`，再启动。
+
+用户 LXC 回滚：`pct rollback <vmid> <snapshot>`；或从 `vzdump` 备份 `pct restore`。
 
 ## 8. 安全约定
 
 - 不在代码、提交、日志、卡片或聊天中输出明文密钥。
-- 不把 `bridge.env`、`service.env`、数据库、日志、备份复制进仓库。
+- 不把 `bridge.env`、`service.env`、`config/users.json`、数据库、日志、备份复制进仓库。
 - 生产环境只做部署，不直接改代码；确需热修复时，在服务器提交并推回 GitHub，再让本地拉取。
 - 执行删除、覆盖、数据库写操作等高风险命令前先确认影响范围。
 - 通过 SSH 执行需要 `sudo` 的命令前，先确认目标用户已配置免密 sudo；若未配置，停止并让用户先配置 `visudo`，不要尝试交互式输入密码或其它提权方式。
+- 不在生产服务器上执行 `pct create` / `pct destroy` / `pct resize`，除非用户明确要求并确认 VMID。
+- 用户 LXC 不开放 SSH；不要给用户 LXC 配置 root 密码或 SSH 服务。
 
-## 9. 参考文档
+## 9. opencode 升级流程（强制）
 
-- `README.md`：完整部署、更新、回滚、备份与故障排查说明。
+opencode 的 `fs/write` 是 experimental 接口，升级可能破坏文件投递。升级步骤：
+
+1. 在**模板 LXC** 内按 `docs/lxc-template-manual.md` 安装新版本（或从模板克隆一个测试 LXC）。
+2. 跑 `scripts/smoke-test.sh --url http://<test-ip>:4096 --password <pw>`，全部通过。
+3. 用新模板重建用户 LXC，或逐个在用户 LXC 内升级。
+4. 每个用户升级后跑 `/smoke` 或服务器侧冒烟。
+5. 任何一步失败：停止，回滚到上一个版本，不要继续推广。
+
+## 10. 参考文档
+
+- `README.md`：架构、部署、文件收发、新用户开通、故障排查。
+- `docs/plan-lxc-sandbox.md`：完整设计与实施计划。
+- `docs/lxc-template-manual.md`：模板 LXC 手工创建教程。
+- `docs/lxc-scripts.md`：`add-user.sh` / `remove-user.sh` 用法与排错。
 - `todo.md`：后续优化方向与优先级。
 - `bridge.env.example`：全部环境变量及默认值。
