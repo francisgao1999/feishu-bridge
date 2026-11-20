@@ -8,6 +8,9 @@ bridge.env
 service.env
 bridge.env.bak-*
 service.env.bak-*
+config/users.json
+config/users.json.bak
+data/
 *.db
 *.db-shm
 *.db-wal

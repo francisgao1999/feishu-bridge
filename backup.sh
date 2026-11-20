@@ -24,6 +24,12 @@ resolve_path() {
 DATA_DIR=$(resolve_path "${BRIDGE_DATA_DIR:-$BASE}" "$BASE")
 DB=$(resolve_path "${BRIDGE_DB:-$DATA_DIR/bridge.db}" "$DATA_DIR")
 ENV_FILE=$(resolve_path "${BRIDGE_ENV_FILE:-$BASE/bridge.env}" "$BASE")
+USERS_FILE="${BRIDGE_USERS_FILE:-$BASE/config/users.json}"
+# bridge.env（compose 用）里写的是容器内路径 /app/...；宿主机备份时映射回安装目录。
+case "$USERS_FILE" in
+    /app/*) USERS_FILE="$BASE/${USERS_FILE#/app/}" ;;
+esac
+USERS_FILE=$(resolve_path "$USERS_FILE" "$BASE")
 DEST=$(resolve_path "${BRIDGE_BACKUP_DIR:-$BASE/backups}" "$BASE")
 STAMP=$(date +%Y%m%d-%H%M%S)
 TMP=$(mktemp -d)
@@ -59,6 +65,13 @@ if [[ -f "$ENV_FILE" ]]; then
     cp "$ENV_FILE" "$TMP/bridge.env"
 else
     echo "warning: missing env file: $ENV_FILE" >&2
+fi
+
+if [[ -f "$USERS_FILE" ]]; then
+    mkdir -p "$TMP/config"
+    cp "$USERS_FILE" "$TMP/config/users.json"
+else
+    echo "warning: missing users file: $USERS_FILE" >&2
 fi
 
 mkdir -p "$TMP/app"

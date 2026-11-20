@@ -112,6 +112,15 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS outbox_sent (
+    open_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    file_name TEXT,
+    sent_at INTEGER NOT NULL,
+    PRIMARY KEY (open_id, sha256, size)
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_chat
     ON sessions(chat_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_tasks_session_status
@@ -275,6 +284,15 @@ class Database:
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM chats WHERE chat_id=?", (chat_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_chat_by_open_id(self, open_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM chats WHERE open_id=? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (open_id,),
             ).fetchone()
             return dict(row) if row else None
 
@@ -1099,3 +1117,42 @@ class Database:
                 """,
                 (key, value),
             )
+
+    # ------------------------------------------------------------------
+    # outbox dedupe
+    # ------------------------------------------------------------------
+    def is_outbox_sent(self, open_id: str, sha256: str, size: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM outbox_sent "
+                "WHERE open_id=? AND sha256=? AND size=?",
+                (open_id, sha256, size),
+            ).fetchone()
+            return row is not None
+
+    def mark_outbox_sent(
+        self,
+        open_id: str,
+        sha256: str,
+        size: int,
+        file_name: str | None = None,
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO outbox_sent(
+                    open_id, sha256, size, file_name, sent_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(open_id, sha256, size) DO UPDATE SET
+                    file_name=excluded.file_name,
+                    sent_at=excluded.sent_at
+                """,
+                (open_id, sha256, size, file_name, int(time.time())),
+            )
+
+    def prune_outbox_sent(self, older_than: int) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM outbox_sent WHERE sent_at < ?", (older_than,)
+            )
+            return cur.rowcount

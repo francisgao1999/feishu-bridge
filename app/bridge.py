@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
-import shutil
-import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,7 +37,7 @@ from cards import (
 )
 from config import Config
 from db import Database
-from feishu import FeishuClient
+from feishu import FeishuClient, FeishuError
 from forms import (
     answer_from_form_value,
     build_form_card,
@@ -48,6 +47,7 @@ from forms import (
 )
 from opencode import OpenCodeClient, OpenCodeError, OpenCodeSyncClient
 from permissions import build_session_permissions
+from users import UserRegistry
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +69,54 @@ def _short(text: str, limit: int = 120) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
+
+
+_IMAGE_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+}
+
+
+def _guess_image_ext(path: str) -> str:
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return ".bin"
+    if head.startswith(b"\x89PNG"):
+        return ".png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"GIF8"):
+        return ".gif"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return ".webp"
+    if head.startswith(b"BM"):
+        return ".bmp"
+    return ".bin"
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _human_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{int(size)} B"
 
 
 def _task_state(task: dict[str, Any] | None) -> str:
@@ -569,12 +617,14 @@ class Bridge:
         oc: OpenCodeClient,
         oc_sync: OpenCodeSyncClient,
         feishu: FeishuClient,
+        users: UserRegistry | None = None,
     ):
         self.cfg = cfg
         self.db = db
         self.oc = oc
         self.oc_sync = oc_sync
         self.feishu = feishu
+        self.users = users or UserRegistry(None)
 
         self._session_ids = db.get_session_ids()
         self._final_text: dict[str, str] = {}
@@ -591,6 +641,10 @@ class Bridge:
         self._clean_pending: dict[str, set[str]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._stopping = False
+        # --- sandbox / multi-user state ------------------------------
+        self._pending_attachments: dict[str, list[dict[str, Any]]] = {}
+        self._upload_sem = asyncio.Semaphore(2)
+        self._outbox_dirty: set[str] = set()
 
     # ------------------------------------------------------------------
     # startup / shutdown
@@ -605,7 +659,6 @@ class Bridge:
                 "marked %s stale task(s) as failed", len(self._stale_tasks)
             )
         self._recover_schedules()
-        self._sweep_temp_dirs()
 
     async def notify_stale_tasks(self) -> None:
         for task in self._stale_tasks:
@@ -704,14 +757,31 @@ class Bridge:
             if not self.db.mark_event_processed(message.message_id):
                 log.info("duplicate message %s", message.message_id)
                 return
+            if self.users.configured and self.users.get(open_id) is None:
+                asyncio.create_task(
+                    self._notify_unknown_user(message.chat_id, open_id)
+                )
+                return
 
             text = self._extract_text(message)
             if text is None:
-                asyncio.create_task(
-                    self.feishu.send_text_async(
-                        message.chat_id, "目前只支持文本消息。"
+                if message.message_type in ("file", "image"):
+                    asyncio.create_task(
+                        self._handle_attachment(
+                            message.chat_id,
+                            open_id,
+                            message.message_id,
+                            message.message_type,
+                            message.content,
+                        )
                     )
-                )
+                else:
+                    asyncio.create_task(
+                        self.feishu.send_text_async(
+                            message.chat_id,
+                            "目前支持文本、文件和图片消息。",
+                        )
+                    )
                 return
             asyncio.create_task(
                 self._handle_text(
@@ -725,6 +795,307 @@ class Bridge:
         if not self.cfg.allowed_open_ids:
             return True
         return open_id in self.cfg.allowed_open_ids
+
+    # ------------------------------------------------------------------
+    # multi-user helpers
+    # ------------------------------------------------------------------
+    def _workspace_for(self, open_id: str) -> str:
+        entry = self.users.get(open_id)
+        if entry is not None:
+            return entry.workspace
+        return self.cfg.workspace_dir
+
+    def _open_id_for_chat(self, chat_id: str) -> str | None:
+        chat = self.db.get_chat(chat_id)
+        return chat.get("open_id") if chat else None
+
+    def _open_id_for_session(self, session_id: str) -> str | None:
+        session = self.db.get_session(session_id)
+        return session.get("open_id") if session else None
+
+    async def _notify_unknown_user(
+        self, chat_id: str, open_id: str
+    ) -> None:
+        """Tell the user they are not provisioned and ping the admin."""
+        try:
+            await self.feishu.send_text_async(
+                chat_id,
+                "你还没有开通使用权限。\n"
+                f"请把下面这行发给管理员：open_id={open_id}",
+            )
+        except Exception:
+            log.exception("send unknown-user notice failed")
+
+        key = f"unknown_user_notified:{open_id}"
+        now = time.time()
+        try:
+            last = float(self.db.get_setting(key) or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if now - last < self.cfg.unknown_user_cooldown_seconds:
+            return
+        self.db.set_setting(key, str(int(now)))
+        for admin in self.cfg.admin_open_ids:
+            try:
+                await self.feishu.send_text_async(
+                    admin,
+                    "有未开通用户尝试使用桥接器：\n"
+                    f"open_id={open_id}\nchat_id={chat_id}\n"
+                    "如需开通，请把 open_id 加入 config/users.json。",
+                )
+            except Exception:
+                log.exception("notify admin %s failed", admin)
+
+    async def _handle_attachment(
+        self,
+        chat_id: str,
+        open_id: str,
+        message_id: str,
+        message_type: str,
+        raw_content: str,
+    ) -> None:
+        """Download a Feishu file/image and push it into the user workspace."""
+        try:
+            content = json.loads(raw_content)
+        except Exception:
+            content = {}
+        if not isinstance(content, dict):
+            content = {}
+        if message_type == "image":
+            file_key = content.get("image_key")
+        else:
+            file_key = content.get("file_key")
+        if not file_key:
+            await self.feishu.send_text_async(
+                chat_id, "无法读取附件信息，请重新发送。"
+            )
+            return
+
+        upload_dir = Path(self.cfg.upload_tmp_dir)
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("cannot create upload tmp dir %s: %s", upload_dir, exc)
+            await self.feishu.send_text_async(
+                chat_id, "服务器临时目录不可用，请稍后再试。"
+            )
+            return
+
+        local_path = str(upload_dir / f"{message_id}-{file_key}")
+        async with self._upload_sem:
+            try:
+                reported = await self.feishu.download_resource_async(
+                    message_id,
+                    file_key,
+                    "image" if message_type == "image" else "file",
+                    local_path,
+                    max_bytes=self.cfg.max_upload_bytes,
+                )
+            except FeishuError as exc:
+                await self.feishu.send_text_async(
+                    chat_id, f"附件下载失败：{exc}"
+                )
+                return
+            except Exception as exc:
+                log.exception("download attachment failed")
+                await self.feishu.send_text_async(
+                    chat_id, f"附件下载失败：{exc}"
+                )
+                return
+
+            try:
+                size = os.path.getsize(local_path)
+                if size > self.cfg.max_upload_bytes:
+                    await self.feishu.send_text_async(
+                        chat_id,
+                        "附件超过 100 MB 上限，无法处理。",
+                    )
+                    return
+                name = (
+                    reported
+                    or content.get("file_name")
+                    or str(file_key)
+                )
+                name = os.path.basename(str(name)) or "attachment"
+                if message_type == "image":
+                    stem = os.path.splitext(name)[0] or "image"
+                    name = stem + _guess_image_ext(local_path)
+                digest = _sha256_file(local_path)
+                remote_path = await self._upload_to_workspace(
+                    open_id, local_path, name
+                )
+            except Exception as exc:
+                log.exception("upload attachment to workspace failed")
+                await self.feishu.send_text_async(
+                    chat_id, f"附件写入工作区失败：{exc}"
+                )
+                return
+            finally:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+
+        self._pending_attachments.setdefault(chat_id, []).append(
+            {
+                "path": remote_path,
+                "name": name,
+                "size": size,
+                "sha256": digest,
+            }
+        )
+        kind = "图片" if message_type == "image" else "文件"
+        await self.feishu.send_text_async(
+            chat_id,
+            f"已收到{kind}：{remote_path}（{_human_size(size)}）\n"
+            "下一条消息会附带该文件路径，直接说要我做什么即可。",
+        )
+
+    async def _upload_to_workspace(
+        self, open_id: str, local_path: str, name: str
+    ) -> str:
+        """Upload to <workspace>/uploads/<name>; fall back to the workspace root."""
+        workspace = self._workspace_for(open_id)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        remote_name = f"{stamp}-{name}"
+        uploads_dir = f"{workspace.rstrip('/')}/{self.cfg.upload_subdir}"
+        remote_path = f"{uploads_dir}/{remote_name}"
+        try:
+            await self.oc.upload_file(
+                open_id, local_path, remote_path, uploads_dir
+            )
+            return remote_path
+        except OpenCodeError as exc:
+            log.warning(
+                "upload to %s failed (%s); retrying in workspace root",
+                uploads_dir,
+                exc,
+            )
+        remote_path = f"{workspace.rstrip('/')}/{remote_name}"
+        await self.oc.upload_file(
+            open_id, local_path, remote_path, workspace
+        )
+        return remote_path
+
+    def _attachment_prefix(self, chat_id: str) -> str:
+        attachments = self._pending_attachments.pop(chat_id, [])
+        if not attachments:
+            return ""
+        lines = ["用户上传了以下文件："]
+        for item in attachments:
+            lines.append(
+                f"- {item['path']}（{_human_size(item['size'])}，"
+                f"sha256 {item['sha256'][:16]}…）"
+            )
+        return "\n".join(lines) + "\n\n"
+
+    async def _deliver_outbox(
+        self, chat_id: str, open_id: str | None = None
+    ) -> None:
+        """Send files from <workspace>/outbox back to the user."""
+        open_id = open_id or self._open_id_for_chat(chat_id)
+        if not open_id:
+            return
+        workspace = self._workspace_for(open_id)
+        outbox = f"{workspace.rstrip('/')}/{self.cfg.outbox_subdir}"
+        try:
+            entries = await self.oc.list_dir(open_id, outbox, workspace)
+        except OpenCodeError as exc:
+            if exc.status_code in (400, 404):
+                return
+            log.warning("list outbox failed for %s: %s", open_id, exc)
+            return
+        except Exception as exc:
+            log.warning("list outbox failed for %s: %s", open_id, exc)
+            return
+        names = []
+        for entry in entries:
+            if entry.get("type") != "file":
+                continue
+            name = str(entry.get("path") or "")
+            if not name or name.endswith("/"):
+                continue
+            base = os.path.basename(name)
+            if base:
+                names.append(base)
+        # 单轮最多处理 10 个，避免一次任务结束触发大量下载。
+        names.sort()
+        batch = names[:10]
+        if len(names) > len(batch):
+            self._outbox_dirty.add(open_id)
+        for name in batch:
+            remote_path = f"{outbox}/{name}"
+            try:
+                await self._deliver_outbox_file(
+                    chat_id, open_id, remote_path, name
+                )
+            except Exception:
+                log.exception("deliver outbox file %s failed", name)
+                # Retry on the next outbox scan.
+                self._outbox_dirty.add(open_id)
+
+    async def _deliver_outbox_file(
+        self, chat_id: str, open_id: str, remote_path: str, name: str
+    ) -> None:
+        workspace = self._workspace_for(open_id)
+        tmpdir = Path(self.cfg.upload_tmp_dir)
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        local_path = str(tmpdir / f"outbox-{os.getpid()}-{time.time_ns()}")
+        try:
+            size = await self.oc.download_file(
+                open_id, remote_path, local_path, workspace
+            )
+            digest = _sha256_file(local_path)
+            if self.db.is_outbox_sent(open_id, digest, size):
+                return
+            ext = os.path.splitext(name)[1].lower()
+            if ext in _IMAGE_EXTENSIONS and size <= self.cfg.max_outbox_image_bytes:
+                image_key = await self.feishu.upload_image_async(local_path)
+                await self.feishu.send_image_async(chat_id, image_key)
+            elif size <= self.cfg.max_outbox_file_bytes:
+                file_key = await self.feishu.upload_file_async(
+                    local_path, name
+                )
+                await self.feishu.send_file_async(chat_id, file_key)
+            else:
+                await self.feishu.send_text_async(
+                    chat_id,
+                    f"outbox 文件过大，未发送：{name}"
+                    f"（{_human_size(size)}，上限 30 MB）",
+                )
+                # 记入已发送清单，避免每次任务结束都重复提醒；
+                # 文件内容变化后 sha256 不同，会重新提醒。
+                self.db.mark_outbox_sent(open_id, digest, size)
+                return
+            self.db.mark_outbox_sent(open_id, digest, size)
+            log.info("delivered outbox file %s to %s", name, open_id)
+        finally:
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
+
+    async def outbox_loop(self) -> None:
+        """Retry undelivered outbox files for users with recent activity."""
+        while not self._stopping:
+            try:
+                await asyncio.sleep(self.cfg.outbox_scan_seconds)
+            except asyncio.CancelledError:
+                raise
+            try:
+                self.db.prune_outbox_sent(int(time.time()) - 7 * 24 * 3600)
+            except Exception:
+                log.exception("prune outbox dedupe failed")
+            targets = set(self._outbox_dirty)
+            self._outbox_dirty.clear()
+            for open_id in targets:
+                chat = self.db.get_chat_by_open_id(open_id)
+                if not chat:
+                    continue
+                try:
+                    await self._deliver_outbox(chat["chat_id"], open_id)
+                except Exception:
+                    log.exception("outbox scan failed for %s", open_id)
 
     def _session_model(
         self,
@@ -763,15 +1134,16 @@ class Bridge:
         self,
         chat: dict[str, Any] | None,
         session_id: str | None = None,
+        open_id: str | None = None,
     ) -> str:
-        if session_id:
-            session = self.db.get_session(session_id)
-            if session and session.get("temporary") and session.get("temp_dir"):
-                return str(session["temp_dir"])
-        return self.cfg.workspace_dir
+        return self._workspace_for(open_id) if open_id else self.cfg.workspace_dir
 
     async def _get_agents(
-        self, directory: str, *, refresh: bool = False
+        self,
+        open_id: str,
+        directory: str,
+        *,
+        refresh: bool = False,
     ) -> list[dict[str, Any]]:
         now = time.time()
         if (
@@ -781,7 +1153,7 @@ class Bridge:
             and now - self._agent_catalog_at < 60
         ):
             return self._agent_catalog
-        agents = await self.oc.list_agents(directory)
+        agents = await self.oc.list_agents(open_id, directory)
         self._agent_catalog = agents
         self._agent_catalog_dir = directory
         self._agent_catalog_at = now
@@ -829,14 +1201,12 @@ class Bridge:
         # 同一聊天的消息串行处理，避免 /new 尚未创建完会话时，
         # 紧随其后的任务消息被派到旧会话。
         async with self._chat_lock(chat_id):
-            chat = self.db.get_chat(chat_id)
-            if chat and chat["session_id"]:
-                session = self.db.get_session(chat["session_id"])
-                if session and session.get("temporary"):
-                    self._touch_session(chat["session_id"])
             if text.startswith("/"):
                 await self._handle_command(chat_id, open_id, text)
                 return
+            prefix = self._attachment_prefix(chat_id)
+            if prefix:
+                text = prefix + text
             parsed = parse_schedule_text(text)
             if parsed:
                 await self._create_schedule(
@@ -893,13 +1263,9 @@ class Bridge:
         argument = parts[1].strip() if len(parts) > 1 else ""
 
         if command in ("/help", "/start"):
-            await self.feishu.send_text_async(
-                chat_id, help_text(self._temp_ttl_text())
-            )
+            await self.feishu.send_text_async(chat_id, help_text())
         elif command == "/new":
             await self._cmd_new(chat_id, open_id, argument)
-        elif command in ("/temp", "/t", "/临时"):
-            await self._cmd_temp(chat_id, open_id, argument)
         elif command in ("/sessions", "/list"):
             await self._cmd_sessions(chat_id)
         elif command in ("/switch", "/use"):
@@ -920,6 +1286,8 @@ class Bridge:
             await self._cmd_agent(chat_id, open_id, argument)
         elif command == "/stop":
             await self._cmd_stop(chat_id, argument)
+        elif command == "/smoke":
+            await self._cmd_smoke(chat_id, open_id)
         elif command == "/whoami":
             chat = self.db.get_chat(chat_id)
             session_id = chat["session_id"] if chat else None
@@ -981,142 +1349,6 @@ class Bridge:
             )
         except Exception:
             log.exception("send new session notice failed")
-
-    async def _cmd_temp(
-        self,
-        chat_id: str,
-        open_id: str,
-        argument: str,
-    ) -> None:
-        action = argument.strip().lower()
-        if action in ("end", "结束", "stop"):
-            await self._cmd_temp_end(chat_id)
-            return
-        if action in ("list", "列表"):
-            await self._cmd_temp_list(chat_id)
-            return
-
-        chat = self.db.get_chat(chat_id)
-        current_id = chat["session_id"] if chat else None
-        current = self.db.get_session(current_id) if current_id else None
-        if current and current.get("temporary") and not argument:
-            current_title = current.get("title") or current_id
-            await self.feishu.send_text_async(
-                chat_id,
-                f"当前已经是临时会话【{current_title}】。\n"
-                "直接发送内容即可继续；发送 /temp end 结束并删除临时目录。",
-            )
-            return
-
-        title = (
-            _short(argument, 40)
-            if argument
-            else f"临时-{datetime.now().strftime('%m%d-%H%M%S')}"
-        )
-        try:
-            session_id = await self._create_session(
-                chat_id,
-                open_id,
-                title,
-                temporary=True,
-                activate=True,
-            )
-        except Exception as exc:
-            log.exception("create temp session failed")
-            await self.feishu.send_text_async(
-                chat_id, f"创建临时会话失败: {exc}"
-            )
-            return
-
-        session = self.db.get_session(session_id)
-        temp_dir = session.get("temp_dir") if session else None
-        title_text = (
-            (session.get("title") if session else None)
-            or title
-            or session_id
-        )
-        try:
-            await self.feishu.send_text_async(
-                chat_id,
-                f"已创建临时会话【{title_text}】\n"
-                f"{session_id}\n"
-                f"临时工作目录：{temp_dir or '-'}\n"
-                f"{self._temp_ttl_text()}；发送 /temp end 立即结束。\n"
-                "直接发送内容开始对话。",
-            )
-        except Exception:
-            log.exception("send temp session notice failed")
-
-    async def _cmd_temp_end(self, chat_id: str) -> None:
-        chat = self.db.get_chat(chat_id)
-        session_id = chat["session_id"] if chat else None
-        session = self.db.get_session(session_id) if session_id else None
-        if not session or not session.get("temporary"):
-            await self.feishu.send_text_async(
-                chat_id, "当前不是临时会话。"
-            )
-            return
-
-        active = self.db.get_active_task(session_id)
-        if active:
-            await self.feishu.send_text_async(
-                chat_id,
-                f"临时会话还有任务 #{active['id']} 执行中，"
-                "请先 /stop 或等待完成后再结束。",
-            )
-            return
-
-        # 先清空当前会话，避免删除后 chats.session_id 指向不存在的会话。
-        self.db.clear_active_session(chat_id)
-        ok, message = await self._delete_session(session, chat_id)
-        if ok:
-            await self.feishu.send_text_async(
-                chat_id,
-                "已结束临时会话并删除临时工作目录。\n"
-                "当前会话已清空，发送任意消息会自动创建普通会话。",
-            )
-        else:
-            # 手动结束失败时把到期时间提前，让 watchdog 下一轮立即重试。
-            self.db.touch_session(session_id, temp_ttl=0)
-            await self.feishu.send_text_async(
-                chat_id,
-                f"已退出临时会话，但清理失败：{message}\n"
-                "后台会自动重试。",
-            )
-
-    async def _cmd_temp_list(self, chat_id: str) -> None:
-        sessions = self.db.list_temp_sessions(chat_id)
-        if not sessions:
-            await self.feishu.send_text_async(
-                chat_id, "当前没有临时会话。发送 /temp 创建。"
-            )
-            return
-
-        chat = self.db.get_chat(chat_id)
-        active_id = chat["session_id"] if chat else None
-        now = int(time.time())
-        lines = [f"临时会话（共 {len(sessions)} 个）"]
-        for index, session in enumerate(sessions, 1):
-            session_id = session["session_id"]
-            marker = " [当前]" if session_id == active_id else ""
-            expires_at = session.get("expires_at") or now
-            remaining = max(0, int(expires_at - now))
-            state = _task_state(
-                self.db.get_active_task(session_id)
-            )
-            lines.append(
-                f"{index}. {session.get('title') or '(无标题)'}{marker}"
-                f"  [{state} / 剩 {remaining // 60} 分钟]"
-            )
-            lines.append(f"   {session_id}")
-            if session.get("temp_dir"):
-                lines.append(f"   目录: {session['temp_dir']}")
-        lines.append("")
-        lines.append(
-            "发送 /temp end 结束当前临时会话；"
-            "/delete <session_id> 删除其他临时会话。"
-        )
-        await self.feishu.send_text_async(chat_id, "\n".join(lines))
 
     def _list_sessions_with_current(
         self, chat_id: str
@@ -1191,14 +1423,6 @@ class Bridge:
                 if item["session_id"] == session_id
             )
             flags: list[str] = []
-            if session.get("temporary"):
-                flags.append("临时")
-                expires_at = session.get("expires_at")
-                if expires_at:
-                    remaining = max(
-                        0, int(expires_at - time.time())
-                    )
-                    flags.append(f"剩 {remaining // 60} 分钟")
             flags.append(_task_state(active_task))
             if pending_count:
                 flags.append(f"待审批 {pending_count}")
@@ -1349,11 +1573,7 @@ class Bridge:
             state=state,
             last_task=last_info,
             empty_text=empty_text,
-            note=(
-                f"临时会话：{self._temp_ttl_text()}。"
-                if session.get("temporary")
-                else None
-            ),
+            note=None,
         )
         await self.feishu.send_card_async(chat_id, card)
 
@@ -1437,16 +1657,6 @@ class Bridge:
             )
             return
         chat = self.db.get_chat(chat_id)
-        if (
-            chat
-            and chat["session_id"] == session["session_id"]
-            and session.get("temporary")
-        ):
-            await self.feishu.send_text_async(
-                chat_id,
-                "当前是临时会话，请发送 /temp end 结束并删除临时目录。",
-            )
-            return
         ok, message = await self._delete_session(session, chat_id)
         await self.feishu.send_text_async(chat_id, message)
 
@@ -1498,10 +1708,6 @@ class Bridge:
         except Exception as exc:
             log.exception("delete OpenCode session %s failed", session_id)
             return False, f"删除会话 {title} 失败：{exc}"
-
-        temp_dir = session.get("temp_dir")
-        if temp_dir:
-            await asyncio.to_thread(self._remove_temp_dir, temp_dir)
 
         self.db.delete_session(session_id)
         self._session_ids.discard(session_id)
@@ -1623,23 +1829,13 @@ class Bridge:
             chat, session_id
         )
         current_agent = self._session_agent(chat, session_id)
-        current_session = (
-            self.db.get_session(session_id) if session_id else None
-        )
-        workspace = self.cfg.workspace_dir
+        workspace = self._workspace_for(chat.get("open_id") if chat else "")
         note: str | None = None
-        if current_session and current_session.get("temporary"):
-            workspace = (
-                current_session.get("temp_dir") or workspace
-            )
-            note = f"临时会话：{self._temp_ttl_text()}。"
         sessions = []
         all_sessions, _ = self._list_sessions_with_current(chat_id)
         for session in all_sessions:
             task = self.db.get_active_task(session["session_id"])
             state = _task_state(task)
-            if session.get("temporary"):
-                state = f"临时 / {state}"
             sessions.append(
                 {
                     "session_id": session["session_id"],
@@ -1667,7 +1863,7 @@ class Bridge:
     ) -> None:
         self.db.ensure_chat(chat_id, open_id)
         try:
-            models = await self.oc.list_models()
+            models = await self.oc.list_models(open_id)
         except Exception as exc:
             log.exception("list models failed")
             await self.feishu.send_text_async(
@@ -1782,9 +1978,11 @@ class Bridge:
         self.db.ensure_chat(chat_id, open_id)
         chat = self.db.get_chat(chat_id)
         session_id = chat["session_id"] if chat else None
-        directory = self._agent_directory(chat, session_id)
+        directory = self._agent_directory(chat, session_id, open_id)
         try:
-            agents = await self._get_agents(directory, refresh=True)
+            agents = await self._get_agents(
+                open_id, directory, refresh=True
+            )
         except Exception as exc:
             log.exception("list agents failed")
             await self.feishu.send_text_async(
@@ -1869,6 +2067,7 @@ class Bridge:
                         agent_id,
                         readonly_agents=self.cfg.readonly_agents,
                         agent_info=agent,
+                        sandbox_mode=self.cfg.sandbox_mode,
                     ),
                 )
             except Exception as exc:
@@ -1970,6 +2169,57 @@ class Bridge:
         await self.feishu.send_text_async(
             chat_id, f"已向会话 {title} 发送中止请求。"
         )
+
+    async def _cmd_smoke(self, chat_id: str, open_id: str) -> None:
+        """Run a minimal end-to-end check against the user's OpenCode server."""
+        lines = ["冒烟测试"]
+        ok = True
+        workspace = self._workspace_for(open_id)
+        lines.append(f"工作区: {workspace}")
+
+        try:
+            models = await self.oc.list_models(open_id)
+            lines.append(f"✅ 连接 OpenCode 成功（{len(models)} 个模型）")
+        except Exception as exc:
+            ok = False
+            lines.append(f"❌ 连接 OpenCode 失败: {exc}")
+
+        if ok:
+            tmpdir = Path(self.cfg.upload_tmp_dir)
+            tmpdir.mkdir(parents=True, exist_ok=True)
+            stamp = int(time.time())
+            local = str(tmpdir / f"smoke-{stamp}.bin")
+            remote = f"{workspace.rstrip('/')}/.smoke-{stamp}.bin"
+            payload = os.urandom(1024 * 1024)
+            readback = str(tmpdir / f"smoke-{stamp}.out")
+            try:
+                with open(local, "wb") as handle:
+                    handle.write(payload)
+                await self.oc.upload_file(
+                    open_id, local, remote, workspace
+                )
+                await self.oc.download_file(
+                    open_id, remote, readback, workspace
+                )
+                with open(readback, "rb") as handle:
+                    got = handle.read()
+                if got == payload:
+                    lines.append("✅ 文件写入/读取一致")
+                else:
+                    ok = False
+                    lines.append("❌ 文件写入/读取内容不一致")
+            except Exception as exc:
+                ok = False
+                lines.append(f"❌ 文件写入/读取失败: {exc}")
+            finally:
+                for path in (local, readback):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
+        lines.append("结果: " + ("通过" if ok else "失败"))
+        await self.feishu.send_text_async(chat_id, "\n".join(lines))
 
     # ------------------------------------------------------------------
     # schedules
@@ -2784,7 +3034,6 @@ class Bridge:
         title: str | None,
         *,
         activate: bool = True,
-        temporary: bool = False,
     ) -> str:
         now = datetime.now().strftime("%m%d-%H%M%S")
         session_title = title or f"feishu-{chat_id[-6:]}-{now}"
@@ -2796,20 +3045,11 @@ class Bridge:
         agent = self._session_agent(
             chat, chat["session_id"] if chat else None
         )
-
-        temp_dir: str | None = None
-        directory = self.cfg.workspace_dir
-        expires_at: int | None = None
-        if temporary:
-            temp_dir = self._make_temp_dir()
-            directory = temp_dir
-            expires_at = int(time.time()) + max(
-                self.cfg.temp_session_ttl_seconds, 60
-            )
+        directory = self._workspace_for(open_id)
 
         agent_info: dict[str, Any] | None = None
         try:
-            agents = await self._get_agents(directory)
+            agents = await self._get_agents(open_id, directory)
             agent_info = next(
                 (item for item in agents if item["id"] == agent), None
             )
@@ -2834,23 +3074,18 @@ class Bridge:
             agent,
             readonly_agents=self.cfg.readonly_agents,
             agent_info=agent_info,
+            sandbox_mode=self.cfg.sandbox_mode,
         )
 
-        try:
-            session_id = await self.oc.create_session(
-                title=session_title,
-                directory=directory,
-                agent=agent,
-                provider_id=provider_id,
-                model_id=model_id,
-                permissions=permissions,
-            )
-        except Exception:
-            if temp_dir:
-                await asyncio.to_thread(
-                    self._remove_temp_dir, temp_dir
-                )
-            raise
+        session_id = await self.oc.create_session(
+            open_id,
+            title=session_title,
+            directory=directory,
+            agent=agent,
+            provider_id=provider_id,
+            model_id=model_id,
+            permissions=permissions,
+        )
 
         try:
             self.db.add_session(
@@ -2861,9 +3096,6 @@ class Bridge:
                 provider_id,
                 model_id,
                 agent,
-                temporary=temporary,
-                temp_dir=temp_dir,
-                expires_at=expires_at,
             )
             if activate:
                 self.db.upsert_chat(
@@ -2885,99 +3117,19 @@ class Bridge:
                     "cleanup OpenCode session %s after DB failure failed",
                     session_id,
                 )
-            if temp_dir:
-                await asyncio.to_thread(
-                    self._remove_temp_dir, temp_dir
-                )
             raise
 
         self._session_ids.add(session_id)
         log.info(
-            "created session %s for chat %s (activate=%s, temporary=%s)",
+            "created session %s for chat %s (activate=%s)",
             session_id,
             chat_id,
             activate,
-            temporary,
         )
         return session_id
 
     def _touch_session(self, session_id: str) -> None:
-        self.db.touch_session(
-            session_id, temp_ttl=self.cfg.temp_session_ttl_seconds
-        )
-
-    def _temp_ttl_text(self) -> str:
-        ttl = self.cfg.temp_session_ttl_seconds
-        if ttl <= 0:
-            return "空闲后立即清理"
-        return f"空闲 {max(1, ttl // 60)} 分钟后自动清理"
-
-    def _make_temp_dir(self) -> str:
-        root = Path(self.cfg.temp_workspace_root).expanduser().resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(root, 0o700)
-        except OSError:
-            log.warning("chmod temp root %s failed", root)
-        return tempfile.mkdtemp(prefix="temp-", dir=root)
-
-    def _remove_temp_dir(self, temp_dir: str | None) -> bool:
-        if not temp_dir:
-            return True
-        root = Path(self.cfg.temp_workspace_root).expanduser().resolve()
-        path = Path(temp_dir)
-        try:
-            parent = path.parent.resolve()
-        except OSError:
-            return False
-        if not parent.is_relative_to(root):
-            log.error(
-                "refusing to remove temp dir outside root: %s", temp_dir
-            )
-            return False
-        try:
-            if path.is_symlink() or path.is_file():
-                path.unlink()
-                return True
-            resolved = path.resolve()
-            if resolved == root or not resolved.is_relative_to(root):
-                log.error(
-                    "refusing to remove temp dir outside root: %s",
-                    temp_dir,
-                )
-                return False
-            shutil.rmtree(path)
-            return True
-        except FileNotFoundError:
-            return True
-        except Exception:
-            log.exception("remove temp dir %s failed", temp_dir)
-            return False
-
-    def _sweep_temp_dirs(self) -> None:
-        root = Path(self.cfg.temp_workspace_root).expanduser().resolve()
-        if not root.exists():
-            return
-        known: set[Path] = set()
-        for value in self.db.list_temp_dirs():
-            try:
-                known.add(Path(value).resolve())
-            except OSError:
-                continue
-        try:
-            children = list(root.iterdir())
-        except OSError:
-            log.exception("list temp root %s failed", root)
-            return
-        for child in children:
-            try:
-                resolved = child.resolve()
-            except OSError:
-                continue
-            if resolved in known or resolved == root.resolve():
-                continue
-            log.info("removing orphan temp path %s", child)
-            self._remove_temp_dir(str(child))
+        self.db.touch_session(session_id)
 
     # ------------------------------------------------------------------
     # card actions
@@ -3005,10 +3157,21 @@ class Bridge:
         if not provider_id or not model_id:
             return _toast("error", "无效模型")
 
+        chat = self.db.get_chat(chat_id)
+        if not chat:
+            operator = event.operator.open_id if event.operator else None
+            if not operator:
+                return _toast("error", "无法确定用户")
+            self.db.ensure_chat(chat_id, operator)
+            chat = self.db.get_chat(chat_id)
+        open_id = chat.get("open_id") if chat else None
+        if not open_id:
+            return _toast("error", "无法确定用户")
+
         catalog = self._model_catalog
         if not catalog:
             try:
-                catalog = self.oc_sync.list_models()
+                catalog = self.oc_sync.list_models(open_id)
                 self._model_catalog = catalog
             except Exception as exc:
                 log.exception("load model catalog failed")
@@ -3025,14 +3188,6 @@ class Bridge:
         )
         if not selected:
             return _toast("error", "模型不在列表中，请重新发送 /model")
-
-        chat = self.db.get_chat(chat_id)
-        if not chat:
-            operator = event.operator.open_id if event.operator else None
-            if not operator:
-                return _toast("error", "无法确定用户")
-            self.db.ensure_chat(chat_id, operator)
-            chat = self.db.get_chat(chat_id)
 
         requested_session_id = value.get("session_id")
         if requested_session_id:
@@ -3119,11 +3274,15 @@ class Bridge:
         else:
             session_id = chat.get("session_id") if chat else None
 
-        directory = self._agent_directory(chat, session_id)
+        open_id = chat.get("open_id") if chat else None
+        if not open_id:
+            return _toast("error", "无法确定用户")
+
+        directory = self._agent_directory(chat, session_id, open_id)
         catalog = self._agent_catalog
         if not catalog or self._agent_catalog_dir != directory:
             try:
-                catalog = self.oc_sync.list_agents(directory)
+                catalog = self.oc_sync.list_agents(open_id, directory)
                 self._agent_catalog = catalog
                 self._agent_catalog_dir = directory
                 self._agent_catalog_at = time.time()
@@ -3158,6 +3317,7 @@ class Bridge:
                         str(agent_id),
                         readonly_agents=self.cfg.readonly_agents,
                         agent_info=selected,
+                        sandbox_mode=self.cfg.sandbox_mode,
                     ),
                 )
             except Exception as exc:
@@ -3430,33 +3590,73 @@ class Bridge:
     # SSE
     # ------------------------------------------------------------------
     async def sse_loop(self) -> None:
+        """Keep one SSE connection per unique OpenCode server."""
+        tasks: dict[str, asyncio.Task[Any]] = {}
+        while not self._stopping:
+            try:
+                servers = self._sse_servers()
+                for base_url, auth in servers.items():
+                    task = tasks.get(base_url)
+                    if task is None or task.done():
+                        tasks[base_url] = asyncio.create_task(
+                            self._sse_server_loop(base_url, auth)
+                        )
+                for base_url in list(tasks):
+                    if base_url not in servers:
+                        tasks[base_url].cancel()
+                        del tasks[base_url]
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("sse supervisor failed")
+            await asyncio.sleep(5)
+
+    def _sse_servers(self) -> dict[str, tuple[str, str]]:
+        """Return base_url -> (username, password) for every server."""
+        if not self.users.configured:
+            return {
+                self.cfg.opencode_base_url.rstrip("/"): (
+                    self.cfg.opencode_username,
+                    self.cfg.opencode_password,
+                )
+            }
+        servers: dict[str, tuple[str, str]] = {}
+        for entry in self.users.by_url().values():
+            servers[entry.base_url] = (entry.username, entry.password)
+        return servers
+
+    async def _sse_server_loop(
+        self, base_url: str, auth: tuple[str, str]
+    ) -> None:
         backoff = 1
         while not self._stopping:
             try:
-                await self._consume_sse()
+                await self._consume_sse(base_url, auth)
                 backoff = 1
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.warning("SSE disconnected: %s", exc)
+                log.warning("SSE disconnected from %s: %s", base_url, exc)
             if self._stopping:
                 break
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
-    async def _consume_sse(self) -> None:
+    async def _consume_sse(
+        self, base_url: str, auth: tuple[str, str]
+    ) -> None:
         timeout = httpx.Timeout(
             connect=5.0, read=None, write=10.0, pool=5.0
         )
         async with httpx.AsyncClient(
-            base_url=self.cfg.opencode_base_url,
-            auth=(self.cfg.opencode_username, self.cfg.opencode_password),
+            base_url=base_url,
+            auth=auth,
             timeout=timeout,
         ) as client:
             async with aconnect_sse(
                 client, "GET", "/api/event"
             ) as source:
-                log.info("SSE connected")
+                log.info("SSE connected to %s", base_url)
                 async for sse in source.aiter_sse():
                     if self._stopping:
                         return
@@ -3714,6 +3914,11 @@ class Bridge:
                 final_text,
                 self.cfg.max_text_chunk,
             )
+        try:
+            open_id = self._open_id_for_session(session_id)
+            await self._deliver_outbox(task["chat_id"], open_id)
+        except Exception:
+            log.exception("deliver outbox failed for task %s", task["id"])
         log.info("task %s succeeded", task["id"])
 
     async def _finish_task_failure(
@@ -3785,80 +3990,37 @@ class Bridge:
                 raise
             except Exception:
                 log.exception("task watchdog failed")
-            try:
-                await self._cleanup_expired_temp_sessions()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("temp session cleanup failed")
             await asyncio.sleep(self.cfg.task_reconcile_seconds)
-
-    async def _cleanup_expired_temp_sessions(self) -> None:
-        sessions = self.db.list_expired_temp_sessions(int(time.time()))
-        for session in sessions:
-            session_id = session["session_id"]
-            chat_id = session["chat_id"]
-            async with self._chat_lock(chat_id):
-                current = self.db.get_session(session_id)
-                if not current or not current.get("temporary"):
-                    continue
-                expires_at = current.get("expires_at")
-                if expires_at and expires_at > int(time.time()):
-                    # 等待锁期间被用户消息或 /switch 续期了。
-                    continue
-                if self.db.get_active_task(session_id):
-                    continue
-                if self.db.has_pending_permissions(session_id):
-                    continue
-                if self.db.has_pending_forms(session_id):
-                    continue
-
-                chat = self.db.get_chat(chat_id)
-                was_current = bool(
-                    chat and chat["session_id"] == session_id
-                )
-                if was_current:
-                    self.db.clear_active_session(chat_id)
-                ok, message = await self._delete_session(
-                    current, chat_id
-                )
-                if ok:
-                    log.info(
-                        "cleaned expired temp session %s", session_id
-                    )
-                    if was_current:
-                        await self.feishu.send_text_async(
-                            chat_id,
-                            "临时会话已到期并清理，当前会话已清空。\n"
-                            "发送任意消息会自动创建普通会话。",
-                        )
-                else:
-                    # 失败后 5 分钟再试，避免每 60 秒刷日志。
-                    self.db.touch_session(session_id, temp_ttl=300)
-                    log.warning(
-                        "clean expired temp session %s failed: %s",
-                        session_id,
-                        message,
-                    )
 
     async def _reconcile_active_tasks(self) -> None:
         tasks = self.db.list_active_tasks()
         if not tasks:
             return
-        try:
-            active_sessions = await self.oc.list_active_sessions()
-        except Exception as exc:
-            log.warning("list active sessions failed: %s", exc)
-            return
+        by_user: dict[str, list[dict[str, Any]]] = {}
+        for task in tasks:
+            open_id = self._open_id_for_session(task["session_id"])
+            if not open_id:
+                continue
+            by_user.setdefault(open_id, []).append(task)
 
         now = time.time()
-        for task in tasks:
+        for open_id, user_tasks in by_user.items():
             try:
-                await self._reconcile_task(task, active_sessions, now)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("reconcile task %s failed", task["id"])
+                active_sessions = await self.oc.list_active_sessions(open_id)
+            except Exception as exc:
+                log.warning(
+                    "list active sessions failed for %s: %s", open_id, exc
+                )
+                continue
+            for task in user_tasks:
+                try:
+                    await self._reconcile_task(
+                        task, active_sessions, now
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("reconcile task %s failed", task["id"])
 
     async def _reconcile_task(
         self,

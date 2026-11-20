@@ -184,6 +184,71 @@ def _wildcard_match(value: str, pattern: str) -> bool:
     return re.match(regex, value) is not None
 
 
+# Patterns relaxed when the bridge runs in sandbox mode (one LXC per user).
+#
+# Inside the per-user LXC the agent already runs as root, so ``sudo``/``su``
+# are noise and ``systemctl``/``service`` are how the user manages their own
+# PostgreSQL or MySQL. Installing packages is an intended workflow (``.sql``
+# imports), so ``apt install`` and friends are allowed without approval while
+# full upgrades stay gated.
+SANDBOX_RELAXED_PATTERNS: frozenset[str] = frozenset(
+    {
+        "sudo *",
+        "su *",
+        "doas *",
+        "pkexec *",
+        "systemctl *start*",
+        "systemctl *stop*",
+        "systemctl *restart*",
+        "systemctl *reload*",
+        "systemctl *enable*",
+        "systemctl *disable*",
+        "systemctl *mask*",
+        "systemctl *unmask*",
+        "systemctl *daemon-reload*",
+        "systemctl *daemon-reexec*",
+        "systemctl *isolate*",
+        "systemctl *kill*",
+        "systemctl *set-property*",
+        "systemctl *edit*",
+        "systemctl *revert*",
+        "service * start*",
+        "service * stop*",
+        "service * restart*",
+        "service * reload*",
+        "shutdown *",
+        "reboot *",
+        "poweroff *",
+        "halt *",
+        "useradd *",
+        "userdel *",
+        "usermod *",
+        "groupadd *",
+        "groupdel *",
+        "passwd *",
+        "crontab *",
+        "at *",
+        "apt install*",
+        "apt remove*",
+        "apt purge*",
+        "apt-get install*",
+        "apt-get remove*",
+        "apt-get purge*",
+    }
+)
+
+# Explicit allows appended after the ask rules so they win in sandbox mode.
+SANDBOX_ALLOWED_PATTERNS: tuple[str, ...] = (
+    "apt install*",
+    "apt remove*",
+    "apt purge*",
+    "apt-get install*",
+    "apt-get remove*",
+    "apt-get purge*",
+)
+
+
+
 def agent_is_read_only(agent: dict[str, Any] | None) -> bool:
     """Whether an agent's own rules deny generic file edits.
 
@@ -213,21 +278,32 @@ def build_session_permissions(
     *,
     readonly_agents: frozenset[str] | set[str] = frozenset({"plan"}),
     agent_info: dict[str, Any] | None = None,
+    sandbox_mode: bool = False,
 ) -> list[dict[str, str]]:
     """Return the ordered permission rules for a new bridge session.
 
     Read-only agents (``plan`` by default) must not receive the session-level
     ``edit * ask`` rule, otherwise it would override the agent's own
     ``edit * deny`` rule.
+
+    In ``sandbox_mode`` the bridge runs one LXC per user, so privilege and
+    service-management patterns are relaxed and package installs are allowed.
     """
     read_only = agent in readonly_agents or agent_is_read_only(agent_info)
     rules: list[dict[str, str]] = [
         # Allow routine shell commands. Specific rules below override this.
         {"action": "shell", "resource": "*", "effect": "allow"},
     ]
+    patterns = DANGEROUS_SHELL_PATTERNS
+    if sandbox_mode:
+        patterns = tuple(
+            pattern
+            for pattern in DANGEROUS_SHELL_PATTERNS
+            if pattern not in SANDBOX_RELAXED_PATTERNS
+        )
     rules.extend(
         {"action": "shell", "resource": pattern, "effect": "ask"}
-        for pattern in DANGEROUS_SHELL_PATTERNS
+        for pattern in patterns
     )
     # .env.example is safe to read even though it matches cat *.env.*.
     rules.append(
@@ -237,6 +313,11 @@ def build_session_permissions(
             "effect": "allow",
         }
     )
+    if sandbox_mode:
+        rules.extend(
+            {"action": "shell", "resource": pattern, "effect": "allow"}
+            for pattern in SANDBOX_ALLOWED_PATTERNS
+        )
     if not read_only:
         # File edits still require approval for normal agents.
         rules.append({"action": "edit", "resource": "*", "effect": "ask"})

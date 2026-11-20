@@ -157,6 +157,40 @@ class BackupScriptTest(unittest.TestCase):
         backup = next((self.install / "backups").glob("bridge-*.tar.gz"))
         self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
 
+    def test_users_file_is_backed_up(self):
+        self.make_db(self.install / "bridge.db")
+        (self.install / "bridge.env").write_text(
+            "FEISHU_APP_ID=test\n", encoding="utf-8"
+        )
+        config_dir = self.install / "config"
+        config_dir.mkdir()
+        (config_dir / "users.json").write_text(
+            '[{"open_id": "ou_test"}]\n', encoding="utf-8"
+        )
+        result = self.run_backup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backup = next((self.install / "backups").glob("bridge-*.tar.gz"))
+        names = self.read_tar(backup)
+        self.assertIn("./config/users.json", names)
+
+    def test_container_users_path_maps_to_install_dir(self):
+        self.make_db(self.install / "bridge.db")
+        (self.install / "bridge.env").write_text(
+            "FEISHU_APP_ID=test\n"
+            "BRIDGE_USERS_FILE=/app/config/users.json\n",
+            encoding="utf-8",
+        )
+        config_dir = self.install / "config"
+        config_dir.mkdir()
+        (config_dir / "users.json").write_text(
+            '[{"open_id": "ou_test"}]\n', encoding="utf-8"
+        )
+        result = self.run_backup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backup = next((self.install / "backups").glob("bridge-*.tar.gz"))
+        names = self.read_tar(backup)
+        self.assertIn("./config/users.json", names)
+
 
 if __name__ == "__main__":
     unittest.main()

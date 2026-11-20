@@ -622,18 +622,12 @@ def schedule_help_text() -> str:
     )
 
 
-def help_text(temp_ttl_text: str = "空闲 30 分钟后自动清理") -> str:
+def help_text(temp_ttl_text: str = "") -> str:
     return (
         "可用命令\n"
         "\n"
         "【会话管理】\n"
         "/new [标题]  创建并切换到新会话；标题不会发给模型\n"
-        "/temp [标题]  创建并切换到临时会话；标题不会发给模型"
-        "（别名 /t、/临时）\n"
-        "/temp end  结束当前临时会话并删除临时目录"
-        "（也可写 /temp 结束、/temp stop）\n"
-        "/temp list  查看临时会话、剩余时间和目录"
-        "（也可写 /temp 列表）\n"
         "/sessions  列出全部会话及运行状态（别名 /list）\n"
         "/switch <序号|session_id|标题>  切换当前会话（别名 /use）\n"
         "/last [序号|session_id]  重发最后一次任务结果"
@@ -644,9 +638,11 @@ def help_text(temp_ttl_text: str = "空闲 30 分钟后自动清理") -> str:
         "（不含当前会话；confirm 也可写 确认/yes/y；别名 /清理）\n"
         "/status  查看当前会话、全部会话、任务和审批状态\n"
         "/whoami  显示 open_id / chat_id / session_id / 会话标题 / 模型 / Agent\n"
+        "/smoke  运行一次冒烟测试（检查 OpenCode 服务、文件读写）\n"
         "\n"
         "【任务、模型与 Agent】\n"
         "直接发送文本  在当前会话派任务\n"
+        "直接发送文件或图片  保存到工作区并附带说明\n"
         "/stop [序号|session_id]  中止任务并清理待审批，默认当前会话\n"
         "/model  打开模型选择卡片\n"
         "/model <序号>  按列表序号切换模型\n"
@@ -680,11 +676,11 @@ def help_text(temp_ttl_text: str = "空闲 30 分钟后自动清理") -> str:
         "13:38分提醒我【去接水】\n"
         "\n"
         "【说明】\n"
-        "发送 /new 或 /temp 后，下一条普通消息才会发给模型。\n"
+        "发送 /new 后，下一条普通消息才会发给模型。\n"
         "多个会话可以同时执行任务：在 A 会话跑任务时，发送 "
         "/new B 创建 B 会话，再发送任务即可并行执行；之后用 /switch 切回 A。\n"
-        "临时会话使用独立空目录，适合一次性实验；"
-        f"{temp_ttl_text}，发送 /temp end 可立即结束。\n"
+        "agent 产出的文件放到 /workspace/outbox/ 会自动回传；"
+        "图片不超过 10MB，其他文件不超过 30MB。\n"
         "执行 shell 或修改文件时会发审批卡片，"
         "只支持「允许一次」或「拒绝」。\n"
         "/help  显示本帮助（别名 /start）"

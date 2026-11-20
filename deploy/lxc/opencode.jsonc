@@ -1,0 +1,48 @@
+{
+  // 用户 LXC 内的 OpenCode 配置模板。
+  // 安装位置：/etc/opencode/opencode/opencode.jsonc
+  // 实际读取路径用 `opencode debug config` 确认。
+  // 本文件不含 dbx（DBX 只在管理员本机使用）。
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": true,
+  "experimental": {
+    "todo": true
+  },
+  "model": "systalyze/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "agents": {
+    "build": {
+      "model": "systalyze/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    },
+    "plan": {
+      "model": "systalyze/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    }
+  },
+  "providers": {
+    "systalyze": {
+      "name": "systalyze",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://inference.systalyze.com/v1",
+        "apiKey": "{env:SYSTALYZE_API_KEY}"
+      },
+      "models": {
+        "deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+          "name": "DeepSeek V4.1 Flash",
+          "capabilities": {
+            "tools": true,
+            "input": ["text", "image"],
+            "output": ["text"]
+          }
+        },
+        "deepseek-ai/DeepSeek-V4-Pro-0813": {
+          "name": "DeepSeek V4 Pro",
+          "capabilities": {
+            "tools": true,
+            "input": ["text"],
+            "output": ["text"]
+          }
+        }
+      }
+    }
+  }
+}

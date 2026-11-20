@@ -206,5 +206,46 @@ class DatabaseFormTest(unittest.TestCase):
             self.assertIn("interrupted", columns)
 
 
+class OutboxSentTest(unittest.TestCase):
+    def test_dedupe_round_trip(self):
+        db = Database(":memory:")
+        try:
+            db.init()
+            self.assertFalse(db.is_outbox_sent("ou_alice", "abc", 10))
+            db.mark_outbox_sent("ou_alice", "abc", 10, "report.pdf")
+            self.assertTrue(db.is_outbox_sent("ou_alice", "abc", 10))
+            # Same hash with a different size is a different file.
+            self.assertFalse(db.is_outbox_sent("ou_alice", "abc", 11))
+            # Another user is independent.
+            self.assertFalse(db.is_outbox_sent("ou_bob", "abc", 10))
+        finally:
+            db.close()
+
+    def test_mark_is_idempotent(self):
+        db = Database(":memory:")
+        try:
+            db.init()
+            db.mark_outbox_sent("ou_alice", "abc", 10, "a.txt")
+            db.mark_outbox_sent("ou_alice", "abc", 10, "b.txt")
+            row = db._conn.execute(
+                "SELECT COUNT(*) AS n FROM outbox_sent"
+            ).fetchone()
+            self.assertEqual(row["n"], 1)
+        finally:
+            db.close()
+
+    def test_prune_removes_old_rows(self):
+        db = Database(":memory:")
+        try:
+            db.init()
+            db.mark_outbox_sent("ou_alice", "abc", 10)
+            import time as _time
+
+            self.assertEqual(db.prune_outbox_sent(int(_time.time()) + 1), 1)
+            self.assertFalse(db.is_outbox_sent("ou_alice", "abc", 10))
+        finally:
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,8 +11,14 @@ from bridge import Bridge
 from config import load_config
 from db import Database
 from feishu import FeishuClient
-from opencode import OpenCodeClient, OpenCodeSyncClient
+from opencode import (
+    OpenCodeClient,
+    OpenCodeRouter,
+    OpenCodeSyncClient,
+    OpenCodeSyncRouter,
+)
 from slash_commands import sync_slash_commands
+from users import UserRegistry
 from ws_patch import patch_ws_client
 
 
@@ -23,7 +29,6 @@ def setup_logging(log_path: str) -> None:
     formatter = logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-
     file_handler = RotatingFileHandler(
         log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
     )
@@ -48,19 +53,40 @@ def main() -> None:
     db = Database(cfg.db_path)
     db.init()
 
-    oc = OpenCodeClient(
-        cfg.opencode_base_url,
-        cfg.opencode_username,
-        cfg.opencode_password,
+    registry = UserRegistry(cfg.users_file)
+    registry.load()
+    if registry.configured:
+        log.info("users.json loaded: %d user(s)", len(registry))
+    else:
+        log.info("users.json not configured; running in single-user mode")
+
+    def resolve_open_id(session_id: str) -> str | None:
+        session = db.get_session(session_id)
+        return session.get("open_id") if session else None
+
+    legacy_oc: OpenCodeClient | None = None
+    legacy_sync: OpenCodeSyncClient | None = None
+    if not cfg.sandbox_mode:
+        legacy_oc = OpenCodeClient(
+            cfg.opencode_base_url,
+            cfg.opencode_username,
+            cfg.opencode_password,
+        )
+        legacy_sync = OpenCodeSyncClient(
+            cfg.opencode_base_url,
+            cfg.opencode_username,
+            cfg.opencode_password,
+        )
+
+    oc = OpenCodeRouter(
+        registry, default=legacy_oc, session_resolver=resolve_open_id
     )
-    oc_sync = OpenCodeSyncClient(
-        cfg.opencode_base_url,
-        cfg.opencode_username,
-        cfg.opencode_password,
+    oc_sync = OpenCodeSyncRouter(
+        registry, default=legacy_sync, session_resolver=resolve_open_id
     )
     feishu = FeishuClient(cfg.feishu_app_id, cfg.feishu_app_secret)
 
-    bridge = Bridge(cfg, db, oc, oc_sync, feishu)
+    bridge = Bridge(cfg, db, oc, oc_sync, feishu, users=registry)
     bridge.startup()
 
     patch_ws_client()
@@ -86,7 +112,7 @@ def main() -> None:
     lark_loop.create_task(bridge.form_expiry_loop())
     lark_loop.create_task(bridge.schedule_loop())
     lark_loop.create_task(bridge.task_watchdog_loop())
-    lark_loop.create_task(bridge.notify_stale_tasks())
+    lark_loop.create_task(bridge.outbox_loop())
     lark_loop.create_task(
         sync_slash_commands(cfg.feishu_app_id, cfg.feishu_app_secret)
     )

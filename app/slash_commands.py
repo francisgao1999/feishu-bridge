@@ -33,11 +33,6 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         "Create a session; the argument is its title",
     ),
     SlashCommand(
-        "temp",
-        "新建临时会话；end 结束 / list 查看",
-        "Create a temporary session; end to finish, list to view",
-    ),
-    SlashCommand(
         "sessions",
         "列出全部会话及运行状态",
         "List all sessions and their status",
@@ -56,6 +51,11 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         "stop",
         "中止任务并清理待审批",
         "Stop the task and clear pending approvals",
+    ),
+    SlashCommand(
+        "smoke",
+        "检查桥接器到 OpenCode 的连接和文件读写",
+        "Check bridge-to-OpenCode connectivity and file I/O",
     ),
     SlashCommand(
         "model",

@@ -155,6 +155,44 @@ class ConfigTest(unittest.TestCase):
                 cfg = config_module.load_config()
             self.assertEqual(cfg.feishu_app_id, "from_env")
 
+    def test_sandbox_defaults(self):
+        cfg = self.load()
+        self.assertEqual(
+            cfg.users_file, str(REPO_ROOT / "config" / "users.json")
+        )
+        self.assertFalse(cfg.sandbox_mode)
+        self.assertEqual(cfg.admin_open_ids, frozenset())
+        self.assertEqual(cfg.unknown_user_cooldown_seconds, 3600)
+        self.assertEqual(cfg.max_upload_bytes, 104857600)
+        self.assertEqual(cfg.upload_subdir, "uploads")
+        self.assertEqual(cfg.outbox_subdir, "outbox")
+        self.assertEqual(cfg.outbox_scan_seconds, 60)
+        self.assertEqual(cfg.max_outbox_image_bytes, 10 * 1024 * 1024)
+        self.assertEqual(cfg.max_outbox_file_bytes, 30 * 1024 * 1024)
+        self.assertEqual(cfg.task_timeout_seconds, 7200)
+
+    def test_sandbox_overrides(self):
+        cfg = self.load(
+            BRIDGE_SANDBOX_MODE="true",
+            BRIDGE_ADMIN_OPEN_IDS="ou_a, ou_b",
+            BRIDGE_USERS_FILE="/srv/users.json",
+            BRIDGE_MAX_UPLOAD_BYTES="2048",
+            BRIDGE_UNKNOWN_USER_COOLDOWN_SECONDS="60",
+            BRIDGE_TASK_TIMEOUT_SECONDS="900",
+        )
+        self.assertTrue(cfg.sandbox_mode)
+        self.assertEqual(cfg.admin_open_ids, frozenset({"ou_a", "ou_b"}))
+        self.assertEqual(cfg.users_file, "/srv/users.json")
+        self.assertEqual(cfg.max_upload_bytes, 2048)
+        self.assertEqual(cfg.unknown_user_cooldown_seconds, 60)
+        self.assertEqual(cfg.task_timeout_seconds, 900)
+
+    def test_sandbox_mode_accepts_container_keyword(self):
+        cfg = self.load(BRIDGE_SANDBOX_MODE="container")
+        self.assertTrue(cfg.sandbox_mode)
+        cfg = self.load(BRIDGE_SANDBOX_MODE="0")
+        self.assertFalse(cfg.sandbox_mode)
+
     def test_bridge_home_can_be_set_in_env_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

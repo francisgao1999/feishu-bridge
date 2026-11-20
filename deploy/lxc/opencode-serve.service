@@ -1,0 +1,24 @@
+[Unit]
+Description=OpenCode V2 API server (per-user sandbox)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/workspace
+Environment=HOME=/root
+Environment=XDG_CONFIG_HOME=/etc/opencode
+Environment=XDG_DATA_HOME=/var/lib/opencode
+Environment=XDG_STATE_HOME=/var/lib/opencode/state
+Environment=XDG_CACHE_HOME=/var/cache/opencode
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/opencode/service.env
+EnvironmentFile=-/etc/opencode/serve.env
+ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --port 4096 --print-logs --log-level info
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

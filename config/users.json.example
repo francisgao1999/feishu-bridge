@@ -1,0 +1,9 @@
+[
+  {
+    "open_id": "ou_xxxxxxxxxxxxxxxxxxxxxxxx",
+    "slug": "alice",
+    "url": "http://10.0.0.11:4096",
+    "password": "change-me-opencode-password",
+    "workspace": "/workspace"
+  }
+]

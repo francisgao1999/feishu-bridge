@@ -44,6 +44,13 @@ def _env_int(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _bridge_home() -> Path:
     raw = os.environ.get("BRIDGE_HOME")
     return Path(raw).expanduser() if raw else _DEFAULT_BRIDGE_HOME
@@ -94,6 +101,18 @@ class Config:
     max_text_chunk: int
     temp_session_ttl_seconds: int
     temp_workspace_root: str
+    # --- multi-user sandbox mode -------------------------------------
+    users_file: str
+    admin_open_ids: frozenset[str]
+    unknown_user_cooldown_seconds: int
+    sandbox_mode: bool
+    upload_tmp_dir: str
+    max_upload_bytes: int
+    upload_subdir: str
+    outbox_subdir: str
+    outbox_scan_seconds: int
+    max_outbox_image_bytes: int
+    max_outbox_file_bytes: int
 
 
 def load_config() -> Config:
@@ -152,7 +171,7 @@ def load_config() -> Config:
         task_reconcile_grace_seconds=_env_int(
             "BRIDGE_TASK_RECONCILE_GRACE_SECONDS", 120
         ),
-        task_timeout_seconds=_env_int("BRIDGE_TASK_TIMEOUT_SECONDS", 3600),
+        task_timeout_seconds=_env_int("BRIDGE_TASK_TIMEOUT_SECONDS", 7200),
         max_final_chars=_env_int("BRIDGE_MAX_FINAL_CHARS", 3000),
         max_text_chunk=_env_int("BRIDGE_MAX_TEXT_CHUNK", 3000),
         temp_session_ttl_seconds=_env_int(
@@ -162,5 +181,34 @@ def load_config() -> Config:
             "BRIDGE_TEMP_WORKSPACE_ROOT",
             Path(workspace_dir) / "temp",
             data_dir,
+        ),
+        users_file=_path(
+            "BRIDGE_USERS_FILE",
+            Path(bridge_home) / "config" / "users.json",
+            bridge_home,
+        ),
+        admin_open_ids=frozenset(
+            item.strip()
+            for item in os.environ.get("BRIDGE_ADMIN_OPEN_IDS", "").split(",")
+            if item.strip()
+        ),
+        unknown_user_cooldown_seconds=_env_int(
+            "BRIDGE_UNKNOWN_USER_COOLDOWN_SECONDS", 3600
+        ),
+        sandbox_mode=_env_bool("BRIDGE_SANDBOX_MODE", False)
+        or os.environ.get("BRIDGE_SANDBOX_MODE", "").strip().lower()
+        in {"container", "sandbox", "lxc"},
+        upload_tmp_dir=_path(
+            "BRIDGE_UPLOAD_TMP_DIR", Path("/tmp") / "opencode-bridge-uploads", data_dir
+        ),
+        max_upload_bytes=_env_int("BRIDGE_MAX_UPLOAD_BYTES", 104857600),
+        upload_subdir=_env("BRIDGE_UPLOAD_SUBDIR", "uploads"),
+        outbox_subdir=_env("BRIDGE_OUTBOX_SUBDIR", "outbox"),
+        outbox_scan_seconds=_env_int("BRIDGE_OUTBOX_SCAN_SECONDS", 60),
+        max_outbox_image_bytes=_env_int(
+            "BRIDGE_MAX_OUTBOX_IMAGE_BYTES", 10 * 1024 * 1024
+        ),
+        max_outbox_file_bytes=_env_int(
+            "BRIDGE_MAX_OUTBOX_FILE_BYTES", 30 * 1024 * 1024
         ),
     )

@@ -1,0 +1,25 @@
+services:
+  bridge:
+    build: .
+    image: feishu-opencode-bridge:latest
+    container_name: feishu-bridge
+    restart: unless-stopped
+    env_file:
+      - ./bridge.env
+    environment:
+      BRIDGE_HOME: /app
+      BRIDGE_DATA_DIR: /app/data
+      BRIDGE_USERS_FILE: /app/config/users.json
+      BRIDGE_SANDBOX_MODE: container
+      BRIDGE_UPLOAD_TMP_DIR: /app/data/uploads
+    volumes:
+      # 必须挂目录，不能挂单文件：pct push 会替换 inode，
+      # 单文件 bind mount 会一直读到旧内容，users.json 热加载失效。
+      - ./config:/app/config:ro
+      - ./data:/app/data
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

@@ -83,6 +83,39 @@ class SessionPermissionsTest(unittest.TestCase):
             rules,
         )
 
+    def test_sandbox_mode_relaxes_privilege_patterns(self):
+        rules = build_session_permissions("build", sandbox_mode=True)
+        resources = {rule["resource"] for rule in rules}
+        self.assertNotIn("sudo *", resources)
+        self.assertNotIn("systemctl *restart*", resources)
+        self.assertNotIn("service * start*", resources)
+        # Destructive operations stay gated.
+        self.assertIn("rm *", resources)
+        self.assertIn("git *push*", resources)
+
+    def test_sandbox_mode_allows_package_installs(self):
+        rules = build_session_permissions("build", sandbox_mode=True)
+        allows = [
+            rule
+            for rule in rules
+            if rule["effect"] == "allow" and rule["action"] == "shell"
+        ]
+        self.assertIn(
+            {"action": "shell", "resource": "apt install*", "effect": "allow"},
+            allows,
+        )
+        # The ask rule must be gone so the allow rule is not shadowed.
+        self.assertNotIn(
+            {"action": "shell", "resource": "apt install*", "effect": "ask"},
+            rules,
+        )
+
+    def test_non_sandbox_keeps_privilege_patterns(self):
+        rules = build_session_permissions("build")
+        resources = {rule["resource"] for rule in rules}
+        self.assertIn("sudo *", resources)
+        self.assertIn("apt install*", resources)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,6 @@ except ImportError:  # flattened workspace without app/ package
 EXPECTED_COMMANDS = {
     "help",
     "new",
-    "temp",
     "sessions",
     "switch",
     "last",
@@ -40,6 +39,7 @@ EXPECTED_COMMANDS = {
     "model",
     "agent",
     "stop",
+    "smoke",
     "whoami",
 }
 
