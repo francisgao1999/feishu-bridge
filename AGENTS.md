@@ -118,9 +118,9 @@ scripts/smoke-test.sh --users config/users.json
 - 提交前检查 `git status` 和 `git diff`，确认没有误提交密钥、数据库、日志、备份或 `users.json`。
 - **禁止**提交 `bridge.env`、`service.env`、`config/users.json`、`data/`、`*.db`、`*.log`、`backups/`、`temp/`、`.venv/`。
 
-## 5. 自动推送与部署（强制流程）
+## 5. 自动推送与本地构建（强制流程）
 
-> 用户要求：每次更新代码，测试通过后，自动 push 到仓库，并更新生产服务器。Agent 不需要再逐次询问，按以下流程直接执行。
+> 用户要求：每次更新代码，测试通过后，自动 push 到仓库，并在**本地**构建镜像和产物。**不要远程部署**，生产服务器由用户手动更新。
 
 ### 5.1 本地提交并推送
 
@@ -144,65 +144,37 @@ git commit -m "feat: ..."
 git push origin main
 ```
 
-### 5.2 更新生产服务器
+### 5.2 本地构建产物
 
-生产服务器通过 SSH 别名访问：
-
-```bash
-ssh oc.vm.pve_hzdd     # 公网 / 外网环境
-ssh oc.vm.pve          # 局域网环境（192.168.110.x 网段）
-```
-
-> 真实 HostName、端口、用户名和私钥路径保存在本机 `~/.ssh/config`，**不要**写入仓库或提交到 GitHub。
-
-登录后进入 bridge 安装目录（docker LXC 内）：
+推送后在开发机（WSL）构建并验证镜像，**不登录任何服务器**：
 
 ```bash
-cd /opt/feishu-bridge
+cd /mnt/d/workspace/code/feishu-bridge
 
-# 1. 先备份数据库、users.json 和 bridge.env
-./backup.sh
-
-# 2. 确认工作区干净；有输出说明服务器有未提交修改，先停下确认来源
-git status --short
-
-# 3. 只允许快进拉取
-git pull --ff-only
-
-# 4. 重建镜像并重启容器
-docker compose build
-docker compose up -d
-
-# 5. 验证
-docker compose ps
-docker compose logs --tail 80 bridge
+# 本机代理只监听 127.0.0.1，构建时用 host 网络并显式传代理
+docker build --network host \
+  --build-arg http_proxy=http://127.0.0.1:10808 \
+  --build-arg https_proxy=http://127.0.0.1:10808 \
+  --build-arg no_proxy=localhost,127.0.0.1 \
+  -t feishu-opencode-bridge:latest .
 ```
 
-如果服务器直连 GitHub 较慢：
+- 构建成功后检查 `docker images feishu-opencode-bridge`。
+- 需要时用 `docker run --rm -it --entrypoint sh feishu-opencode-bridge:latest` 做冒烟检查；不要在容器里连生产。
+- **不要**执行 `ssh` 到生产服务器，不执行 `docker compose up`，不改服务器上的任何文件。
 
-```bash
-set -a
-source "$HOME/.config/opencode/service.env"
-set +a
-export https_proxy="$HTTPS_PROXY" http_proxy="$HTTP_PROXY"
-git pull --ff-only
-```
+### 5.3 部署范围（用户手动执行）
 
-### 5.3 部署范围
-
-- 修改了 `app/`、`requirements.txt`、`Dockerfile`、`docker-compose.yml`：必须 `docker compose build && docker compose up -d`。
-- 修改了 `scripts/`、`deploy/lxc/`、`docs/`：仍需 push；服务器 `git pull --ff-only` 保持同步即可，不需要重建镜像。用户 LXC 内的脚本/配置变更需要管理员手工下发。
-- 纯文档变更（`README.md`、`AGENTS.md`、`todo.md`、`docs/`）：仍需 push；生产服务器执行 `git pull --ff-only` 保持同步即可，可不重启。
-- 数据库结构由 `app/db.py` 在启动时自动迁移；升级前 `./backup.sh` 必须成功。
+- 修改了 `app/`、`requirements.txt`、`Dockerfile`、`docker-compose.yml`：用户需要重建镜像并重启 bridge。
+- 修改了 `scripts/`、`deploy/lxc/`、`docs/`：用户需要把脚本/配置同步到服务器或用户 LXC。
+- 纯文档变更：只需 push。
 - **不要**在服务器上执行 `pct` 创建/删除 LXC；创建 LXC 永远由管理员手工执行。
 
 ### 5.4 异常处理
 
-- 测试失败：停止，不提交、不推送、不部署。
+- 测试失败：停止，不提交、不推送、不构建。
+- 构建失败：报告错误（网络/代理/依赖），不要试着远程构建。
 - `git push` 失败（认证/网络）：报告错误，不要强推，不要改写历史。
-- 服务器 `git status --short` 有输出：停止部署，先确认服务器上的修改是否需要保留；**禁止**直接 `git reset --hard`。
-- `git pull --ff-only` 分叉：先看 `git log --oneline --graph --decorate -10`，按 README「从旧版单用户升级」处理。
-- 部署后容器未启动：查看 `docker compose logs`，必要时回滚并报告。
 - **禁止** `git push --force` 到 `main`。
 
 ### 5.5 完成后汇报
@@ -211,16 +183,15 @@ git pull --ff-only
 
 1. 本次提交的 commit hash 和提交信息；
 2. 测试结果（含冒烟测试是否执行）；
-3. 生产服务器是否已拉取、容器是否 `Up`；
-4. 如有异常，说明卡在哪一步以及当前状态。
+3. 本地镜像是否构建成功（镜像名与大小）；
+4. 如需手动部署，说明需要执行的命令和注意事项。
 
-## 6. 生产服务器信息
+## 6. 部署目标（用户手动维护）
+
+> 以下信息供用户手动部署时参考，Agent **不要**自动化执行。真实主机、端口、用户名以用户本机 `~/.ssh/config` 为准；如与实际不符，让用户确认后再更新本节。
 
 | 项目 | 值 |
 | --- | --- |
-| SSH 别名（公网） | `oc.vm.pve_hzdd` |
-| SSH 别名（局域网） | `oc.vm.pve` |
-| 运行用户 | `oc` |
 | 安装目录 | `/opt/feishu-bridge`（docker LXC 内） |
 | bridge 容器 | `feishu-bridge`（`docker compose`） |
 | 用户映射 | `/opt/feishu-bridge/config/users.json`（仅服务器本地） |
@@ -229,18 +200,17 @@ git pull --ff-only
 | 日志 | `docker compose logs -f bridge` |
 | 备份 | `cd /opt/feishu-bridge && ./backup.sh`，输出到 `backups/` |
 | 模板 LXC | VMID 900，`oc-template` |
-| docker LXC | VMID 100 |
 | 用户 LXC | 从 101 开始，按 `oc-<slug>` 命名 |
-| sudo | 用户 `oc` 已配置 `NOPASSWD: ALL` |
 
-常用运维命令：
+用户部署时的常用命令（由用户执行）：
 
 ```bash
 cd /opt/feishu-bridge
+git pull --ff-only
+docker compose build
+docker compose up -d
 docker compose ps
 docker compose logs -f bridge
-docker compose restart bridge
-docker compose up -d --build
 ```
 
 用户 LXC 运维（在 PVE 宿主执行）：
@@ -263,9 +233,9 @@ git revert <bad-commit>
 git push origin main
 ```
 
-然后按 5.2 部署到生产。
+然后由用户按 5.2 在本地重新构建镜像，并在服务器上手动部署。
 
-紧急情况下可在服务器临时切到上一个可用提交：
+用户紧急回滚时可在服务器临时切到上一个可用提交：
 
 ```bash
 cd /opt/feishu-bridge
@@ -290,7 +260,7 @@ docker compose up -d --build
 
 - 不在代码、提交、日志、卡片或聊天中输出明文密钥。
 - 不把 `bridge.env`、`service.env`、`config/users.json`、数据库、日志、备份复制进仓库。
-- 生产环境只做部署，不直接改代码；确需热修复时，在服务器提交并推回 GitHub，再让本地拉取。
+- 生产环境由用户手动部署，Agent 不远程操作；确需热修复时，在服务器提交并推回 GitHub，再让本地拉取。
 - 执行删除、覆盖、数据库写操作等高风险命令前先确认影响范围。
 - 通过 SSH 执行需要 `sudo` 的命令前，先确认目标用户已配置免密 sudo；若未配置，停止并让用户先配置 `visudo`，不要尝试交互式输入密码或其它提权方式。
 - 不在生产服务器上执行 `pct create` / `pct destroy` / `pct resize`，除非用户明确要求并确认 VMID。
