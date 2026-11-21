@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -196,6 +198,146 @@ class BridgeOutboxTest(unittest.TestCase):
         # 用户提示每次都发，管理员通知在冷却期内不再发。
         self.assertEqual(len(texts), 1)
         self.assertEqual(texts[0][1], "chat1")
+
+    def _message(self, message_type: str, content: dict) -> SimpleNamespace:
+        return SimpleNamespace(
+            message_type=message_type,
+            content=json.dumps(content, ensure_ascii=False),
+        )
+
+    def test_extract_attachments_from_image_post(self) -> None:
+        message = self._message(
+            "post",
+            {
+                "title": "",
+                "content": [
+                    [
+                        {
+                            "tag": "img",
+                            "image_key": "img_v3_123",
+                            "width": 1280,
+                            "height": 720,
+                        }
+                    ],
+                    [{"tag": "text", "text": "描述一下这张图片", "style": []}],
+                ],
+            },
+        )
+        self.assertEqual(
+            self.bridge._extract_attachments(message),
+            [{"type": "image", "file_key": "img_v3_123"}],
+        )
+
+    def test_extract_attachments_from_file_post(self) -> None:
+        message = self._message(
+            "post",
+            {
+                "title": "",
+                "content": [
+                    [{"tag": "text", "text": "这个文件是什么内容？", "style": []}]
+                ],
+                "files": [
+                    {
+                        "file_key": "file_v3_123",
+                        "file_name": "高昌端个人简历.docx",
+                        "is_folder": False,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(
+            self.bridge._extract_attachments(message),
+            [
+                {
+                    "type": "file",
+                    "file_key": "file_v3_123",
+                    "file_name": "高昌端个人简历.docx",
+                }
+            ],
+        )
+
+    def test_extract_attachments_from_pure_image_and_file(self) -> None:
+        image = self._message("image", {"image_key": "img_v3_456"})
+        self.assertEqual(
+            self.bridge._extract_attachments(image),
+            [{"type": "image", "file_key": "img_v3_456"}],
+        )
+        file_message = self._message(
+            "file", {"file_key": "file_v3_456", "file_name": "a.txt"}
+        )
+        self.assertEqual(
+            self.bridge._extract_attachments(file_message),
+            [
+                {
+                    "type": "file",
+                    "file_key": "file_v3_456",
+                    "file_name": "a.txt",
+                }
+            ],
+        )
+
+    def test_extract_attachments_dedupes_keys(self) -> None:
+        message = self._message(
+            "post",
+            {
+                "content": [
+                    [
+                        {"tag": "img", "image_key": "img_v3_dup"},
+                        {"tag": "img", "image_key": "img_v3_dup"},
+                    ]
+                ],
+            },
+        )
+        self.assertEqual(
+            self.bridge._extract_attachments(message),
+            [{"type": "image", "file_key": "img_v3_dup"}],
+        )
+
+    def test_handle_inbound_downloads_attachment_before_text(self) -> None:
+        calls: list[str] = []
+
+        async def fake_attachment(*args, **kwargs) -> None:
+            calls.append("attachment")
+
+        async def fake_text(*args, **kwargs) -> None:
+            calls.append("text")
+
+        with mock.patch.object(
+            self.bridge, "_handle_attachment", new=fake_attachment
+        ), mock.patch.object(self.bridge, "_handle_text", new=fake_text):
+            asyncio.run(
+                self.bridge._handle_inbound(
+                    "chat1",
+                    "ou_alice",
+                    "om_1",
+                    "描述一下这张图片",
+                    [{"type": "image", "file_key": "img_v3_123"}],
+                )
+            )
+        self.assertEqual(calls, ["attachment", "text"])
+
+    def test_handle_inbound_skips_empty_text(self) -> None:
+        calls: list[str] = []
+
+        async def fake_attachment(*args, **kwargs) -> None:
+            calls.append("attachment")
+
+        async def fake_text(*args, **kwargs) -> None:
+            calls.append("text")
+
+        with mock.patch.object(
+            self.bridge, "_handle_attachment", new=fake_attachment
+        ), mock.patch.object(self.bridge, "_handle_text", new=fake_text):
+            asyncio.run(
+                self.bridge._handle_inbound(
+                    "chat1",
+                    "ou_alice",
+                    "om_1",
+                    "   ",
+                    [{"type": "image", "file_key": "img_v3_123"}],
+                )
+            )
+        self.assertEqual(calls, ["attachment"])
 
     def test_attachment_prefix_formats_and_clears(self) -> None:
         self.bridge._pending_attachments["chat1"] = [

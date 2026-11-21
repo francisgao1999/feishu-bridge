@@ -764,24 +764,25 @@ class Bridge:
                 return
 
             text = self._extract_text(message)
+            attachments = self._extract_attachments(message)
+            if attachments:
+                asyncio.create_task(
+                    self._handle_inbound(
+                        message.chat_id,
+                        open_id,
+                        message.message_id,
+                        text,
+                        attachments,
+                    )
+                )
+                return
             if text is None:
-                if message.message_type in ("file", "image"):
-                    asyncio.create_task(
-                        self._handle_attachment(
-                            message.chat_id,
-                            open_id,
-                            message.message_id,
-                            message.message_type,
-                            message.content,
-                        )
+                asyncio.create_task(
+                    self.feishu.send_text_async(
+                        message.chat_id,
+                        "目前支持文本、文件和图片消息。",
                     )
-                else:
-                    asyncio.create_task(
-                        self.feishu.send_text_async(
-                            message.chat_id,
-                            "目前支持文本、文件和图片消息。",
-                        )
-                    )
+                )
                 return
             asyncio.create_task(
                 self._handle_text(
@@ -846,25 +847,40 @@ class Bridge:
             except Exception:
                 log.exception("notify admin %s failed", admin)
 
+    async def _handle_inbound(
+        self,
+        chat_id: str,
+        open_id: str,
+        message_id: str,
+        text: str | None,
+        attachments: list[dict[str, str]],
+    ) -> None:
+        """Download attachments first, then hand the text to the task handler."""
+        for attachment in attachments:
+            try:
+                await self._handle_attachment(
+                    chat_id,
+                    open_id,
+                    message_id,
+                    attachment["type"],
+                    attachment["file_key"],
+                    attachment.get("file_name"),
+                )
+            except Exception:
+                log.exception("handle attachment failed")
+        if text and text.strip():
+            await self._handle_text(chat_id, open_id, message_id, text)
+
     async def _handle_attachment(
         self,
         chat_id: str,
         open_id: str,
         message_id: str,
         message_type: str,
-        raw_content: str,
+        file_key: str | None,
+        file_name: str | None = None,
     ) -> None:
         """Download a Feishu file/image and push it into the user workspace."""
-        try:
-            content = json.loads(raw_content)
-        except Exception:
-            content = {}
-        if not isinstance(content, dict):
-            content = {}
-        if message_type == "image":
-            file_key = content.get("image_key")
-        else:
-            file_key = content.get("file_key")
         if not file_key:
             await self.feishu.send_text_async(
                 chat_id, "无法读取附件信息，请重新发送。"
@@ -911,11 +927,7 @@ class Bridge:
                         "附件超过 100 MB 上限，无法处理。",
                     )
                     return
-                name = (
-                    reported
-                    or content.get("file_name")
-                    or str(file_key)
-                )
+                name = reported or file_name or str(file_key)
                 name = os.path.basename(str(name)) or "attachment"
                 if message_type == "image":
                     stem = os.path.splitext(name)[0] or "image"
@@ -1184,6 +1196,64 @@ class Bridge:
             return "".join(parts).strip()
 
         return None
+
+    def _extract_attachments(self, message: Any) -> list[dict[str, str]]:
+        """Return image/file keys carried by a message.
+
+        Feishu wraps an image or file sent with a caption in a ``post``
+        message: images live in ``content`` elements tagged ``img`` and files
+        in the top-level ``files`` array. Pure ``image``/``file`` messages
+        carry the key directly. Both shapes must be handled, otherwise the
+        caption path silently drops the attachment.
+        """
+        try:
+            content = json.loads(message.content)
+        except Exception:
+            return []
+        if not isinstance(content, dict):
+            return []
+
+        attachments: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def add(kind: str, key: Any, name: Any = None) -> None:
+            if not isinstance(key, str) or not key or key in seen:
+                return
+            seen.add(key)
+            item = {"type": kind, "file_key": key}
+            if isinstance(name, str) and name:
+                item["file_name"] = name
+            attachments.append(item)
+
+        message_type = message.message_type
+        if message_type == "image":
+            add("image", content.get("image_key"))
+        elif message_type == "file":
+            add("file", content.get("file_key"), content.get("file_name"))
+        elif message_type == "post":
+            for line in content.get("content") or []:
+                if not isinstance(line, list):
+                    continue
+                for element in line:
+                    if not isinstance(element, dict):
+                        continue
+                    tag = element.get("tag")
+                    if tag == "img":
+                        add("image", element.get("image_key"))
+                    elif tag == "file":
+                        add(
+                            "file",
+                            element.get("file_key"),
+                            element.get("file_name"),
+                        )
+            for item in content.get("files") or []:
+                if isinstance(item, dict):
+                    add(
+                        "file",
+                        item.get("file_key"),
+                        item.get("file_name"),
+                    )
+        return attachments
 
     def _chat_lock(self, chat_id: str) -> asyncio.Lock:
         lock = self._chat_locks.get(chat_id)
