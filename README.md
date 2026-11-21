@@ -104,13 +104,15 @@ docker LXC（bridge 容器）
 
 按 [`docs/lxc-template-manual.md`](docs/lxc-template-manual.md) **手工**创建模板 LXC（VMID 900）：在 PVE 网页控制台用「创建 CT」向导建容器，再在容器控制台里装软件，最后转成模板。模板只创建一次，之后所有用户从它克隆。
 
-模板包含：Debian 最小系统 + `git`/`python3`/`curl`/`jq` 等约 40MB 工具、Node.js/npm、Playwright MCP + Chromium（供 agent 截图）、opencode v2（不固定小版本）、`LANG=C.UTF-8`（避免控制台中文乱码）、`/workspace`、`/workspace/uploads`、`/workspace/outbox`、`opencode-serve.service`，以及**出站代理**配置：`/etc/opencode/proxy.env`（默认 `192.168.110.11:10808`，HTTP 与 SOCKS5 同端口）、apt/git/pip 的系统级代理、`/etc/profile.d/99-proxy.sh`。代理随模板克隆，每个用户 LXC 自动继承。
+模板包含：Debian 最小系统 + `git`/`python3`/`curl`/`jq` 等约 40MB 工具、Node.js 22（MCP 要求）、Playwright MCP + Chromium（供 agent 截图）、ast-grep MCP（结构化代码搜索）、opencode v2（不固定小版本）、`LANG=C.UTF-8`（避免控制台中文乱码）、`/workspace`、`/workspace/uploads`、`/workspace/outbox`、`opencode-serve.service`，以及**出站代理**配置：`/etc/opencode/proxy.env`（默认 `192.168.110.11:10808`，HTTP 与 SOCKS5 同端口）、`/etc/opencode/service.env`（模型与 MCP 密钥）、apt/git/pip/npm 的系统级代理、`/etc/profile.d/99-proxy.sh`。代理和密钥随模板克隆，每个用户 LXC 自动继承。
+
+模板的 opencode 配置内置 5 个 MCP 服务器：`playwright`、`ast_grep`、`context7`、`exa`、`grep_app`。其中 `context7`/`exa` 的密钥从 `/etc/opencode/service.env` 读取，不要写进 `opencode.jsonc`。
 
 nftables 规则（仅放行 docker LXC 访问 4096）已写好，但 `add-user.sh` 的健康检查和冒烟测试从 PVE 宿主发起，所以**转模板时默认禁用**；需要保留端口限制时按教程 §5.1 放行 PVE 宿主再启用。
 
-工作区 `/workspace/AGENTS.md` 也包含「网络与代理」一节，告诉 opencode 出站走代理、各工具如何显式指定、哪些配置不要改。
+工作区 `/workspace/AGENTS.md` 也包含「网络与代理」和「MCP 工具」两节，告诉 opencode 出站走代理、各工具如何显式指定、哪些配置不要改，以及模板内置了哪些 MCP。
 
-模板默认**不安装**数据库、build-essential；用户需要时自行 `apt install`。Node.js/Playwright/Chromium 已预装，agent 截图不用再临时安装。
+模板默认**不安装**数据库、build-essential；用户需要时自行 `apt install`。Node.js 22/Playwright/Chromium/ast-grep MCP 已预装，agent 截图和代码搜索不用再临时安装。
 
 ### 4. bridge 容器
 

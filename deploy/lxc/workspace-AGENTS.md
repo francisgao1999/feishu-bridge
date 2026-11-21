@@ -38,6 +38,18 @@ playwright screenshot --viewport-size=1280,800 https://example.com /workspace/ou
 
 不要重复写同名文件——桥接器按内容 sha256 去重，内容相同只发一次。
 
+## MCP 工具
+
+模板已配置以下 MCP 服务器，需要时直接调用：
+
+- `playwright`：浏览器导航、截图；
+- `ast_grep`：结构化代码搜索；
+- `context7`：查库文档；
+- `exa`：网页搜索与研究；
+- `grep_app`：搜索 GitHub 公开代码。
+
+远程 MCP（`context7`、`exa`）需要出网，已随 opencode 进程走代理。不要自己改 MCP 配置或往 `opencode.jsonc` 里写密钥。
+
 ## 安装软件
 
 容器内是 root，直接 `apt install`：

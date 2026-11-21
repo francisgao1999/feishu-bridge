@@ -188,7 +188,6 @@ apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates curl git bash coreutils \
   python3 python3-venv python3-pip \
-  nodejs npm \
   jq unzip xz-utils less file procps \
   nftables tzdata
 apt-get clean
@@ -205,17 +204,15 @@ cat > /etc/pip.conf <<EOF
 [global]
 proxy = $HTTP_PROXY
 EOF
-npm config set proxy "$HTTP_PROXY" --location=global
-npm config set https-proxy "$HTTP_PROXY" --location=global
 ```
 
 **不安装**：`build-essential`、`postgresql-client`、`default-mysql-client`、`ripgrep`。需要时由用户任务自己 `apt install`。
 
-`nodejs`/`npm` 预装，供 Playwright MCP 使用；`fonts-noto-cjk` 在 §2.3 安装。
+Node.js 不在这里装：Debian 12 自带的 Node 18 低于 MCP 要求的版本，§2.3 会从 NodeSource 安装 Node 22。`fonts-noto-cjk` 也在 §2.3 安装。
 
 ### 2.1 取仓库文件
 
-后面要用的 `opencode-serve.service`、`opencode.jsonc`、`workspace-AGENTS.md`、`scripts/smoke-test.sh` 都在仓库里。
+后面要用的 `opencode-serve.service`、`opencode.jsonc`、`service.env.example`、`workspace-AGENTS.md`、`scripts/smoke-test.sh` 都在仓库里。
 
 **容器控制台**（走代理克隆；仓库是私有的就用带 token 的地址）：
 
@@ -237,6 +234,7 @@ scp -r deploy/lxc scripts pve_hzdd:/root/feishu-bridge-files/
 ```bash
 pct push 900 /root/feishu-bridge-files/deploy/lxc/opencode-serve.service /tmp/opencode-serve.service
 pct push 900 /root/feishu-bridge-files/deploy/lxc/opencode.jsonc /tmp/opencode.jsonc
+pct push 900 /root/feishu-bridge-files/deploy/lxc/service.env.example /tmp/service.env.example
 pct push 900 /root/feishu-bridge-files/deploy/lxc/workspace-AGENTS.md /tmp/workspace-AGENTS.md
 pct push 900 /root/feishu-bridge-files/scripts/smoke-test.sh /tmp/smoke-test.sh
 ```
@@ -245,7 +243,7 @@ pct push 900 /root/feishu-bridge-files/scripts/smoke-test.sh /tmp/smoke-test.sh
 
 ```bash
 mkdir -p /root/feishu-bridge/deploy/lxc /root/feishu-bridge/scripts
-mv /tmp/opencode-serve.service /tmp/opencode.jsonc /tmp/workspace-AGENTS.md /root/feishu-bridge/deploy/lxc/
+mv /tmp/opencode-serve.service /tmp/opencode.jsonc /tmp/service.env.example /tmp/workspace-AGENTS.md /root/feishu-bridge/deploy/lxc/
 mv /tmp/smoke-test.sh /root/feishu-bridge/scripts/
 chmod +x /root/feishu-bridge/scripts/smoke-test.sh
 ```
@@ -265,16 +263,33 @@ chmod 644 /etc/default/locale
 
 > 已经在容器里时，也可以执行 `localectl set-locale LANG=C.UTF-8`（如果系统装了 `systemd` 的 `localectl`），效果相同。
 
-### 2.3 安装 Playwright MCP 与 Chromium
+### 2.3 安装 Node.js 22、Playwright MCP 与 Chromium
 
-模板预装 Playwright MCP，用户让 agent 截图时不必再临时 `apt install nodejs npm`。
+MCP 服务器对 Node.js 版本有要求：`@playwright/mcp` 需要 Node 20+，`ast-grep-mcp` 需要 Node 22+。Debian 12 自带的 Node 18 不能用，必须从 NodeSource 安装 Node 22。
 
 **容器控制台**：
+
+```bash
+# 安装 Node.js 22（自带 npm）
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install -y --no-install-recommends nodejs
+node --version   # 期望 v22.x
+npm --version
+
+# npm 走代理
+npm config set proxy "$HTTP_PROXY" --location=global
+npm config set https-proxy "$HTTP_PROXY" --location=global
+```
+
+> NodeSource 脚本会写入 `/etc/apt/sources.list.d/nodesource.list` 和 GPG key。容器已导出 `HTTP_PROXY`，脚本里的 `curl` 会继承代理。
+
+然后安装 Playwright MCP 和 Chromium：
 
 ```bash
 # 先取 MCP 依赖的 Playwright 版本，保证浏览器 revision 和 MCP 对得上
 PW_VERSION=$(npm view @playwright/mcp@latest dependencies.playwright)
 npm install -g @playwright/mcp@latest "playwright@$PW_VERSION"
+apt-get update
 playwright install --with-deps chromium
 ```
 
@@ -298,6 +313,22 @@ apt-get install -y --no-install-recommends fonts-noto-cjk
 ```
 
 > 浏览器缓存目录 `/root/.cache/ms-playwright` 会随模板克隆到每个用户 LXC，转模板前不要删。
+
+### 2.4 安装 ast-grep MCP
+
+`ast-grep-mcp` 是本地 MCP 服务器，模板预装后 agent 可以直接做结构化代码搜索。
+
+**容器控制台**：
+
+```bash
+npm install -g ast-grep-mcp
+command -v ast-grep-mcp
+npm ls -g --depth=0 ast-grep-mcp
+```
+
+- `ast-grep-mcp` 依赖 `@ast-grep/cli`，需要 Node 22+。
+- 它是 stdio MCP 服务器，`--help` 不一定有输出；只要 `command -v` 能找到命令即可。
+- `opencode.jsonc` 里用全局命令 `ast-grep-mcp`，不走 `npx` 下载。
 
 ---
 
@@ -353,9 +384,16 @@ chmod 644 /etc/systemd/system/opencode-serve.service
 cp /root/feishu-bridge/deploy/lxc/opencode.jsonc /etc/opencode/opencode/opencode.jsonc
 ```
 
-该文件已内置 `playwright` MCP：调用全局 `playwright-mcp`，固定 `--headless --browser chromium --no-sandbox --isolated`，并把浏览器代理指向 `192.168.110.11:10808`。模板地址变了要同步改这里。
+该文件已内置 5 个 MCP 服务器：
 
-然后填模型服务商的 API Key（也可以放到 §4.4 的 `service.env`）：
+- `playwright`：调用全局 `playwright-mcp`，固定 `--headless --browser chromium --no-sandbox --isolated`，浏览器代理指向 `192.168.110.11:10808`；
+- `ast_grep`：调用全局 `ast-grep-mcp`，做结构化代码搜索；
+- `context7`、`exa`：远程 MCP，分别用 `CONTEXT7_API_KEY`、`EXA_API_KEY` 请求头；
+- `grep_app`：远程 MCP，无需密钥。
+
+远程 MCP 的密钥从 `/etc/opencode/service.env` 读取，不要把明文写进 `opencode.jsonc`。模板地址变了要同步改 `playwright` 的 `--proxy-server`。
+
+模型和 MCP 的密钥统一放到 §4.4 的 `service.env`，不要在 `opencode.jsonc` 里写死：
 
 ```bash
 nano /etc/opencode/opencode/opencode.jsonc
@@ -375,20 +413,28 @@ v2 的输出是目录列表，能看到 `/etc/opencode` 即可；实际读取的
 cp /root/feishu-bridge/deploy/lxc/workspace-AGENTS.md /workspace/AGENTS.md
 ```
 
-该文件含「网络与代理」一节，告诉 opencode 出站走代理、各工具如何显式指定、哪些配置不要改。**不要**删掉这一段。
+该文件含「网络与代理」和「MCP 工具」两节，告诉 opencode 出站走代理、各工具如何显式指定、哪些配置不要改，以及模板内置了哪些 MCP。**不要**删掉这两节。
 
-### 4.4 模型密钥（可选）
+### 4.4 模型与 MCP 密钥
 
 ```bash
 umask 077
-cat > /etc/opencode/service.env <<EOF
-SYSTALYZE_API_KEY=<你的 key>
-EOF
+cp /root/feishu-bridge/deploy/lxc/service.env.example /etc/opencode/service.env
+chmod 600 /etc/opencode/service.env
+nano /etc/opencode/service.env
 ```
+
+填入与管理员本机 OpenCode 相同的三个密钥：
+
+- `SYSTALYZE_API_KEY`：模型服务商；
+- `CONTEXT7_API_KEY`：Context7 远程 MCP；
+- `EXA_API_KEY`：Exa 远程 MCP。
+
+`service.env` 会随模板克隆到每个用户 LXC，权限保持 600。不要把它提交到 Git。
 
 ### 4.5 克隆行为说明
 
-`add-user.sh` 用 `pct clone --full` 克隆，模板里的 `opencode.jsonc`、`/workspace/AGENTS.md`、`/etc/opencode/proxy.env` 会**完整复制**到每个用户 LXC，不是每次重新生成。
+`add-user.sh` 用 `pct clone --full` 克隆，模板里的 `opencode.jsonc`、`/workspace/AGENTS.md`、`/etc/opencode/proxy.env`、`/etc/opencode/service.env` 会**完整复制**到每个用户 LXC，不是每次重新生成。
 
 反过来，模板改完后**不会**同步到已开通的用户，需要逐台下发或重建 LXC。
 
@@ -564,9 +610,12 @@ pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
 - [ ] 克隆内 `nft list ruleset` 能看到放行 `$DOCKER_IP` 和 `$PVE_IP` 的 4096 规则
 - [ ] 克隆内 `PID=$(systemctl show -p MainPID --value opencode-serve); tr '\0' '\n' < /proc/$PID/environ | grep -i proxy` 有输出
 - [ ] 克隆内 `bash -lc 'curl -s -o /dev/null -w "%{http_code}" https://api.github.com'` 返回 200
-- [ ] 克隆内 `/workspace/AGENTS.md` 含「网络与代理」一节
+- [ ] 克隆内 `/workspace/AGENTS.md` 含「网络与代理」和「MCP 工具」两节
+- [ ] 克隆内 `node --version` 是 v22.x
 - [ ] 克隆内 `playwright --version` 有输出，`/root/.cache/ms-playwright` 里有 Chromium
-- [ ] 克隆内 `XDG_CONFIG_HOME=/etc/opencode opencode debug config | grep -i playwright` 能看到 MCP 配置
+- [ ] 克隆内 `command -v playwright-mcp ast-grep-mcp` 都有输出
+- [ ] 克隆内 `XDG_CONFIG_HOME=/etc/opencode opencode debug config | grep -iE 'context7|exa|grep_app|ast_grep|playwright'` 能看到 5 个 MCP 配置
+- [ ] 克隆内 `/etc/opencode/service.env` 存在且权限为 600，包含 `SYSTALYZE_API_KEY`、`CONTEXT7_API_KEY`、`EXA_API_KEY`
 - [ ] 克隆内 `/root/feishu-bridge` 已不存在
 - [ ] 冒烟测试已通过（§7）
 - [ ] 清理测试容器：`pct stop 999 && pct destroy 999`
@@ -593,6 +642,9 @@ pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
 | Playwright MCP 启动失败 | 缺系统库或 Chromium 没下载 | `playwright install --with-deps chromium`；`journalctl -u opencode-serve -n 50 --no-pager` |
 | Chromium 报 sandbox 错误 | 容器内以 root 运行 | `opencode.jsonc` 里已有 `--no-sandbox`，确认没被覆盖 |
 | 截图空白/超时 | 浏览器没走代理 | 检查 MCP 的 `--proxy-server` 是否是 `192.168.110.11:10808` |
+| `ast-grep-mcp` 启动失败 | Node 版本低于 22 | `node --version` 确认是 v22.x；按 §2.3 从 NodeSource 安装 |
+| `context7`/`exa` MCP 返回 401 | `service.env` 缺 key 或变量名不对 | 检查 `/etc/opencode/service.env` 里的 `CONTEXT7_API_KEY`、`EXA_API_KEY`；改完 `systemctl restart opencode-serve` |
+| 远程 MCP 连接超时 | opencode 进程没拿到代理 | `tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value opencode-serve)/environ | grep -i proxy` 确认有输出 |
 
 ---
 

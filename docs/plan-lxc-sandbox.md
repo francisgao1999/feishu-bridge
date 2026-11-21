@@ -10,7 +10,7 @@
 1. 文件与图片**双向**：入站 `file`/`image`，出站 `/workspace/outbox` 约定（§6.4、§6.9）
 2. 上传上限维持 **100 MB**（飞书硬限制，非 OpenCode 限制），超限翻译为可执行建议
 3. 用户 LXC 资源默认 **2048M / swap 1024M / 24G**（§7.3、§9.2）
-4. 模板默认软件包清单定稿：预装 `nodejs`/`npm` 与 Playwright MCP + Chromium，不装 `build-essential`、`postgresql-client`、`default-mysql-client`（§9.1）
+4. 模板默认软件包清单定稿：预装 Node.js 22、Playwright MCP + Chromium、ast-grep MCP，不装 `build-essential`、`postgresql-client`、`default-mysql-client`（§9.1）
 5. 创建模板与用户 LXC **永远手动**，删除所有自动化设想（§7.6）
 6. IP 必须由管理员显式传入；新增 `docs/lxc-scripts.md` 脚本手册（§7.8）
 7. 模板不设 root 密码，管理员用 `pct enter` 进入（§7.9）
@@ -121,8 +121,9 @@ bridge 不访问 Docker，也不需要任何宿主目录。
 | `config/users.json.example` | 用户映射样例（`users.json` 本身不提交） |
 | `deploy/lxc/opencode-serve.service` | 用户 LXC 内的 systemd 单元（`EnvironmentFile` 依次加载 `proxy.env` / `service.env` / `serve.env`，监听 `0.0.0.0:4096`） |
 | `deploy/lxc/proxy.env.example` | 出站代理（生产 `192.168.110.11:10808`，HTTP 与 SOCKS5 同端口），安装为 `/etc/opencode/proxy.env` |
-| `deploy/lxc/opencode.jsonc` | 用户 LXC 内的 opencode 配置模板（providers/agents/MCP，**不含 `dbx`**） |
-| `deploy/lxc/workspace-AGENTS.md` | 投放到 `/workspace/AGENTS.md` 的工作区约定（`apt install -y`、超时分片、outbox 用法、网络与代理） |
+| `deploy/lxc/opencode.jsonc` | 用户 LXC 内的 opencode 配置模板（providers/agents/MCP：`playwright`、`ast_grep`、`context7`、`exa`、`grep_app`，**不含 `dbx`**） |
+| `deploy/lxc/service.env.example` | 模型与远程 MCP 密钥样例，安装为 `/etc/opencode/service.env`（600） |
+| `deploy/lxc/workspace-AGENTS.md` | 投放到 `/workspace/AGENTS.md` 的工作区约定（`apt install -y`、超时分片、outbox 用法、网络与代理、MCP 工具） |
 | `deploy/lxc/add-user.sh` | 克隆 LXC、写入 IP 与 serve.env、更新 `users.json`、`pct push` 到 docker LXC、跑冒烟 |
 | `deploy/lxc/remove-user.sh` | 停用/归档用户 LXC 并从 `users.json` 移除 |
 | `docs/lxc-template-manual.md` | **模板 LXC 手工创建教程**：逐步命令、软件包清单、systemd、nftables、就绪标记、冒烟 |
@@ -289,7 +290,7 @@ OPENCODE_PASSWORD=<与 users.json 一致>
 - 模板放置就绪标记 `/etc/opencode/ready`，供 `add-user.sh` 等待
 - 出站代理统一由模板注入：`/etc/opencode/proxy.env`（`HTTP_PROXY`/`HTTPS_PROXY` = `http://192.168.110.11:10808`，`ALL_PROXY` = `socks5h://192.168.110.11:10808`，600），systemd 单元通过 `EnvironmentFile` 注入 opencode 进程；另有 `/etc/profile.d/99-proxy.sh`、`/etc/apt/apt.conf.d/99proxy`、`git --system` 与 `/etc/pip.conf`，保证 `pct exec` 和登录 shell 都能出站。`NO_PROXY` 覆盖 `localhost`、`127.0.0.1` 与私有网段。代理配置随克隆复制，`add-user.sh` 只验证不改写
 - `/workspace/AGENTS.md` 写明代理用法：优先使用 `$HTTP_PROXY`/`$HTTPS_PROXY`/`$ALL_PROXY`，不写死地址、不清空变量、不改 `/etc/opencode/proxy.env`
-- `/etc/opencode/serve.env`（`OPENCODE_PASSWORD`，600）与 `/etc/opencode/service.env`（模型 API Key 等，600）随模板克隆复制；信任模型下可接受，用户量扩大后再改按用户下发
+- `/etc/opencode/serve.env`（`OPENCODE_PASSWORD`，600）与 `/etc/opencode/service.env`（模型与 MCP API Key，600）随模板克隆复制；信任模型下可接受，用户量扩大后再改按用户下发
 
 ### 6.7 审批放宽
 
@@ -702,8 +703,9 @@ volumes:
 | `jq` | ~1 MB | 非必需 | 处理 JSON 方便，体积小 |
 | `unzip` + `xz-utils` | ~2 MB | 非必需 | 解压常见格式 |
 | `less` + `file` + `procps` | ~2 MB | 非必需 | 排查问题时的基本工具 |
-| `nodejs` / `npm` | ~80 MB | 非必需 | 预装，供 Playwright MCP 使用 |
+| Node.js 22 / `npm` | ~100 MB | 非必需 | 从 NodeSource 安装，供 MCP 使用（`ast-grep-mcp` 要求 Node 22+） |
 | `@playwright/mcp` + `playwright` | ~20 MB | 非必需 | 全局安装，agent 截图用 |
+| `ast-grep-mcp` | ~10 MB | 非必需 | 全局安装，结构化代码搜索 |
 | Chromium（`playwright install chromium`） | ~300 MB | 非必需 | 预装到 `/root/.cache/ms-playwright` |
 | `fonts-noto-cjk` | ~200 MB | 非必需 | 仅当用户要 playwright 截中文页面才装 |
 | ~~`build-essential`~~ | ~200 MB | 不装 | 需要编译时用户自行 `apt install` |
@@ -713,7 +715,7 @@ volumes:
 | ~~`sudo`~~ | — | 不装 | 容器内就是 root |
 | ~~`openssh-server`~~ | — | 不装 | 不开放 SSH |
 
-合计约 **450 MB**（不含可选字体；主要是 Chromium）。手工创建模板时按此清单 `apt install`；每一项在教程里单独一行并带注释，方便后续增删。
+合计约 **500 MB**（不含可选字体；主要是 Chromium）。手工创建模板时按此清单 `apt install`；每一项在教程里单独一行并带注释，方便后续增删。
 
 **opencode 真正需要的只有**：`ca-certificates`、`git`（建议）、以及运行时可执行 `bash`。其余都可以按需装。
 

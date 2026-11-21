@@ -3,32 +3,64 @@
   // 安装位置：/etc/opencode/opencode/opencode.jsonc
   // 实际读取路径用 `opencode debug config` 确认。
   // 本文件不含 dbx（DBX 只在管理员本机使用）。
+  // 远程 MCP 的密钥从 /etc/opencode/service.env 读取，不要把明文写进本文件。
   "$schema": "https://opencode.ai/config.json",
   "lsp": true,
   "experimental": {
     "todo": true
   },
   "mcp": {
-    "playwright": {
-      "type": "local",
-      // 模板已全局安装 @playwright/mcp 和 Chromium，直接用全局命令，避免每次启动走 npx 下载。
-      // 容器内以 root 运行，Chromium 必须加 --no-sandbox；无显示器，必须 --headless。
-      "command": [
-        "playwright-mcp",
-        "--headless",
-        "--browser",
-        "chromium",
-        "--no-sandbox",
-        "--isolated",
-        "--ignore-roots",
-        "--output-dir",
-        "/workspace/outbox",
-        "--proxy-server",
-        "http://192.168.110.11:10808",
-        "--proxy-bypass",
-        "localhost,127.0.0.1"
-      ],
-      "enabled": true
+    "servers": {
+      "context7": {
+        "type": "remote",
+        "url": "https://mcp.context7.com/mcp",
+        "headers": {
+          "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+        },
+        "enabled": true
+      },
+      "exa": {
+        "type": "remote",
+        "url": "https://mcp.exa.ai/mcp",
+        "headers": {
+          "x-api-key": "{env:EXA_API_KEY}"
+        },
+        "enabled": true
+      },
+      "grep_app": {
+        "type": "remote",
+        "url": "https://mcp.grep.app",
+        "enabled": true
+      },
+      "ast_grep": {
+        "type": "local",
+        // 模板已全局安装 ast-grep-mcp，直接用全局命令，避免每次启动走 npx 下载。
+        "command": [
+          "ast-grep-mcp"
+        ],
+        "enabled": true
+      },
+      "playwright": {
+        "type": "local",
+        // 模板已全局安装 @playwright/mcp 和 Chromium，直接用全局命令，避免每次启动走 npx 下载。
+        // 容器内以 root 运行，Chromium 必须加 --no-sandbox；无显示器，必须 --headless。
+        "command": [
+          "playwright-mcp",
+          "--headless",
+          "--browser",
+          "chromium",
+          "--no-sandbox",
+          "--isolated",
+          "--ignore-roots",
+          "--output-dir",
+          "/workspace/outbox",
+          "--proxy-server",
+          "http://192.168.110.11:10808",
+          "--proxy-bypass",
+          "localhost,127.0.0.1"
+        ],
+        "enabled": true
+      }
     }
   },
   "model": "systalyze/deepseek-ai/DeepSeek-V4.1-Flash-1017",

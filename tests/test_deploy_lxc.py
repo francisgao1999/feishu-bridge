@@ -1,11 +1,55 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LXC_DIR = REPO_ROOT / "deploy" / "lxc"
+
+
+def _load_jsonc(path: Path) -> dict:
+    """Parse a JSONC file by removing comments outside string literals."""
+    text = path.read_text(encoding="utf-8")
+    out: list[str] = []
+    index = 0
+    in_string = False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if char == "\\" and index + 1 < len(text):
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char == "/" and index + 1 < len(text):
+            next_char = text[index + 1]
+            if next_char == "/":
+                index += 2
+                while index < len(text) and text[index] != "\n":
+                    index += 1
+                continue
+            if next_char == "*":
+                index += 2
+                while index + 1 < len(text) and not (
+                    text[index] == "*" and text[index + 1] == "/"
+                ):
+                    index += 1
+                index += 2
+                continue
+        out.append(char)
+        index += 1
+    return json.loads("".join(out))
 
 
 class ProxyConfigTest(unittest.TestCase):
@@ -76,6 +120,76 @@ class PlaywrightMcpConfigTest(unittest.TestCase):
         self.assertIn("npm install -g @playwright/mcp", text)
         self.assertIn("playwright install --with-deps chromium", text)
         self.assertIn("ms-playwright", text)
+
+    def test_template_manual_installs_node_22_and_ast_grep(self):
+        text = (REPO_ROOT / "docs" / "lxc-template-manual.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("setup_22.x", text)
+        self.assertIn("npm install -g ast-grep-mcp", text)
+        self.assertIn("service.env.example", text)
+
+
+class McpServersConfigTest(unittest.TestCase):
+    """模板内置的 MCP 服务器要和本机一致，远程 MCP 的密钥必须走环境变量。"""
+
+    def setUp(self):
+        self.config = _load_jsonc(LXC_DIR / "opencode.jsonc")
+        self.servers = self.config["mcp"]["servers"]
+
+    def test_declares_expected_mcp_servers(self):
+        self.assertEqual(
+            set(self.servers),
+            {"context7", "exa", "grep_app", "ast_grep", "playwright"},
+        )
+
+    def test_remote_mcp_uses_environment_keys(self):
+        context7 = self.servers["context7"]
+        self.assertEqual(context7["type"], "remote")
+        self.assertEqual(context7["url"], "https://mcp.context7.com/mcp")
+        self.assertEqual(
+            context7["headers"]["CONTEXT7_API_KEY"], "{env:CONTEXT7_API_KEY}"
+        )
+
+        exa = self.servers["exa"]
+        self.assertEqual(exa["type"], "remote")
+        self.assertEqual(exa["url"], "https://mcp.exa.ai/mcp")
+        self.assertEqual(exa["headers"]["x-api-key"], "{env:EXA_API_KEY}")
+
+        grep_app = self.servers["grep_app"]
+        self.assertEqual(grep_app["type"], "remote")
+        self.assertEqual(grep_app["url"], "https://mcp.grep.app")
+
+    def test_ast_grep_uses_global_command(self):
+        ast_grep = self.servers["ast_grep"]
+        self.assertEqual(ast_grep["type"], "local")
+        self.assertEqual(ast_grep["command"], ["ast-grep-mcp"])
+
+    def test_playwright_uses_global_command(self):
+        playwright = self.servers["playwright"]
+        self.assertEqual(playwright["type"], "local")
+        self.assertEqual(playwright["command"][0], "playwright-mcp")
+
+    def test_no_plaintext_keys_in_config(self):
+        text = (LXC_DIR / "opencode.jsonc").read_text(encoding="utf-8")
+        markers = (
+            "{env:SYSTALYZE_API_KEY}",
+            "{env:CONTEXT7_API_KEY}",
+            "{env:EXA_API_KEY}",
+        )
+        for marker in markers:
+            self.assertIn(marker, text)
+        for prefix in ("stlzi_", "exa_", "ctx7_"):
+            self.assertNotIn(prefix, text)
+
+
+class ServiceEnvExampleTest(unittest.TestCase):
+    """service.env 是模型和远程 MCP 密钥的唯一来源。"""
+
+    def test_lists_required_keys(self):
+        text = (LXC_DIR / "service.env.example").read_text(encoding="utf-8")
+        for key in ("SYSTALYZE_API_KEY=", "CONTEXT7_API_KEY=", "EXA_API_KEY="):
+            self.assertIn(key, text)
 
 
 class AddUserVmidTest(unittest.TestCase):
