@@ -18,6 +18,7 @@ data/
 backups/
 temp/
 app-backup-*/
+dist/
 
 # OS / editor
 .DS_Store

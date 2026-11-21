@@ -7,6 +7,7 @@ services:
     env_file:
       - ./bridge.env
     environment:
+      TZ: Asia/Shanghai
       BRIDGE_HOME: /app
       BRIDGE_DATA_DIR: /app/data
       BRIDGE_USERS_FILE: /app/config/users.json
