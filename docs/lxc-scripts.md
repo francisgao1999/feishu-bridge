@@ -81,7 +81,7 @@ pct stop <vmid> && pct destroy <vmid>
 | `slug 已存在` | `users.json` 里已有 | 先 `remove-user.sh`，或换 slug |
 | `等待就绪标记超时` | 模板没写 `/etc/opencode/ready` | 按 `docs/lxc-template-manual.md` 重建模板 |
 | `健康检查超时` | opencode 启动失败 | `pct exec <vmid> -- journalctl -u opencode-serve -n 50 --no-pager` |
-| `出站代理不可用`（警告） | 模板没配代理，或代理地址错 | 按 `docs/lxc-template-manual.md` §1.1 检查 `/etc/opencode/proxy.env` |
+| `出站代理不可用`（警告） | 模板没配代理，或代理地址错 | 按 `docs/lxc-template-manual.md` §1.4 检查 `/etc/opencode/proxy.env` |
 | `冒烟测试失败` | 网络/鉴权/接口问题 | 按冒烟输出逐项排查 |
 
 ### 1.5 幂等与安全
@@ -109,7 +109,7 @@ pct exec <vmid> -- bash -lc 'env | grep -i proxy'
 pct exec <vmid> -- bash -lc 'curl -fsS -o /dev/null -w "%{http_code}\n" https://api.github.com'
 ```
 
-模板里没有代理配置时，按 `docs/lxc-template-manual.md` §1.1 重建模板；已有用户需要手工补配置或重建 LXC。
+模板里没有代理配置时，按 `docs/lxc-template-manual.md` §1.4 重建模板；已有用户需要手工补配置或重建 LXC。
 
 ---
 

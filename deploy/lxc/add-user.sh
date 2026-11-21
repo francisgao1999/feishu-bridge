@@ -236,7 +236,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
     fi
   else
     echo "警告：模板缺少 /etc/opencode/proxy.env，用户 LXC 将无法出站。" >&2
-    echo "      按 docs/lxc-template-manual.md §1.1 重建模板。" >&2
+    echo "      按 docs/lxc-template-manual.md §1.4 重建模板。" >&2
   fi
 fi
 

@@ -1,87 +1,144 @@
-# 模板 LXC 手工创建教程
+# 模板 LXC 创建教程（PVE 控制台 + 容器内安装）
 
-本教程在 **PVE 宿主机**上手工创建模板 LXC（VMID `900`，主机名 `oc-template`）。创建一次，之后所有用户 LXC 都从它克隆。
+本教程创建模板 LXC（VMID `900`，主机名 `oc-template`）。创建一次，之后所有用户 LXC 都从它克隆。
 
-> 本方案**不提供**模板创建脚本，也不做自动部署。所有命令由管理员手工执行，便于审计和排错。
+流程分两段：
+
+1. **网页控制台**里用「创建 CT」向导建容器；
+2. **容器控制台**里用 shell 装代理、软件和 opencode，最后回网页控制台转成模板。
+
+> 本方案**不提供**模板创建脚本，也不做自动部署。所有操作由管理员在 PVE 控制台手工完成，便于审计和排错。
+
+## 0. 约定与参数
+
+### 0.1 执行位置
+
+本文命令分三类，每条命令前都标了位置：
+
+| 标记 | 在哪执行 | 怎么打开 |
+| --- | --- | --- |
+| **网页控制台** | PVE 网页界面 | 浏览器打开 PVE，左侧选中节点 |
+| **容器控制台** | CT 900 内部 shell | 左侧选中 `900 (oc-template)` → 右上角 `Console` |
+| **宿主 Shell** | PVE 节点 shell | 左侧选中节点 → 右上角 `>_ Shell` |
+
+- 容器控制台打开的是容器自己的 tty，会出现 `oc-template login:` 提示，用创建向导里设的 root 密码登录。
+- 如果不想记密码，也可以从**宿主 Shell** 执行 `pct enter 900` 直接进入容器。
+- 容器内命令都是 root 身份，不需要 `sudo`。
+
+### 0.2 参数表
+
+开工前把这张表填好，后面对应位置替换：
+
+| 参数 | 示例 | 说明 |
+| --- | --- | --- |
+| `VMID` | `900` | 模板固定用 900 |
+| `HOSTNAME` | `oc-template` | 模板主机名 |
+| `TEMPLATE_IP` | `192.168.110.20` | 模板创建期临时 IP，转模板后不再使用 |
+| `PREFIX` | `24` | 网段掩码，按实际填写 |
+| `GATEWAY` | `192.168.110.1` | 网关 |
+| `BRIDGE` | `vmbr0` | 网桥 |
+| `DOCKER_IP` | `192.168.110.11` | 运行 bridge 的 docker LXC 的 IP |
+| `PROXY_HOST` | `192.168.110.11` | 代理地址，生产环境就是 docker LXC |
+| `PROXY_PORT` | `10808` | HTTP 与 SOCKS5 同端口 |
+
+固定规格：内存 `2048M`、swap `1024M`、磁盘 `8G`、CPU `2` 核。
+
+> 模板盘用 8G（克隆快），用户 LXC 克隆后由 `add-user.sh` 扩到 24G。
+> 模板 LXC 的 IP 只用于创建期验证，转成模板后不再启动，用户 LXC 克隆时覆盖 `net0`。
+
+### 0.3 确认系统模板已下载
+
+**宿主 Shell**：
+
+```bash
+pveam update
+pveam available --section system | grep debian
+```
+
+没下载就先 `pveam download local debian-13-standard_13.1-1_amd64.tar.zst`（版本号以实际列表为准）。下载完成后在 **网页控制台** → 节点 → `local (存储)` → `CT 模板` 里能看到它。
 
 ---
 
-## 0. 前置条件
+## 1. 创建容器（网页控制台）
 
-| 项 | 要求 |
-| --- | --- |
-| PVE 版本 | 8.x 或 9.x，`pct` / `pvesh` 可用 |
-| LXC 模板 | Debian 13（trixie）standard，已下载到 `local:vztmpl/` |
-| 磁盘 | 模板盘 8G（克隆快），用户克隆后扩到 24G |
-| 网络 | 有固定网段与网关；docker LXC 的 IP 已知 |
-| 权限 | 在 PVE 宿主机上以 root 执行 |
+### 1.1 用向导创建
 
-先确认模板文件名：
+**网页控制台**：右上角 `创建 CT`，按下表填写。向导底部勾选 `高级`，能看到全部选项。
+
+| 页签 | 字段 | 值 |
+| --- | --- | --- |
+| 常规 | 节点 | 你的 PVE 节点 |
+| 常规 | CT ID | `900` |
+| 常规 | 主机名 | `oc-template` |
+| 常规 | 密码 | 设一个临时 root 密码（转模板前可锁定，见 §8） |
+| 模板 | 存储 | `local` |
+| 模板 | 模板 | `debian-13-standard_*.tar.zst` |
+| 磁盘 | 存储 | `local-lvm`（没有就选实际存储） |
+| 磁盘 | 磁盘大小 | `8` GiB |
+| CPU | 核心 | `2` |
+| 内存 | 内存 | `2048` MiB |
+| 内存 | 交换分区 | `1024` MiB |
+| 网络 | 网桥 | `vmbr0` |
+| 网络 | IPv4 | `静态` |
+| 网络 | IPv4/CIDR | `<TEMPLATE_IP>/<PREFIX>`，例如 `192.168.110.20/24` |
+| 网络 | 网关 | `<GATEWAY>` |
+| 网络 | IPv6 | `无` |
+| 确认 | 无特权容器 | ✅ 勾选 |
+| 确认 | 创建后启动 | ✅ 勾选 |
+
+> `local-lvm` 不存在时，先在 **宿主 Shell** 用 `pvesm status` 查实际存储名。
+
+### 1.2 创建后的两项设置
+
+**网页控制台**：左侧选中 `900 (oc-template)` → `选项`：
+
+1. `功能` → 双击 → 勾选 `嵌套`（nesting），确定。playwright 等需要嵌套。
+2. `开机自启动` → 双击 → 设为 `否`。模板不应该开机自启。
+
+> 也可以用**宿主 Shell** 代替：`pct set 900 --features nesting=1 --onboot 0`。
+
+### 1.3 登录容器控制台
+
+**网页控制台**：选中 `900 (oc-template)` → 右上角 `Console`，用向导里设的 root 密码登录。
+
+登录后先确认基本环境：
 
 ```bash
-pveam list local | grep debian-13
-# 例如 local:vztmpl/debian-13-standard_13.x-1_amd64.tar.zst
+hostname                 # 期望 oc-template
+ip -4 addr show eth0     # 期望 TEMPLATE_IP/PREFIX
+ip route | head -3       # 期望默认路由指向 GATEWAY
 ```
 
-下文用 `$TMPL` 表示这个值，先导出：
+### 1.4 配置出站代理
+
+生产环境用户 LXC 不能直连外网，所有出站流量走 docker LXC 上的代理（HTTP 与 SOCKS5 同为 `10808`）。**先配代理，再装软件**，否则 `apt` 和 opencode 下载都会超时。
+
+**容器控制台**：
 
 ```bash
-export TMPL="local:vztmpl/debian-13-standard_13.x-1_amd64.tar.zst"
-export DOCKER_IP="10.0.0.10"      # 运行 bridge 的 docker LXC 的 IP
-export TEMPLATE_IP="10.0.0.9"     # 模板 LXC 自己的临时 IP（创建期用）
-export GATEWAY="10.0.0.1"
-export BRIDGE="vmbr0"
-export PREFIX="24"                # 按实际网段填写，下面所有 /24 都要一起改
-export PROXY_HOST="192.168.110.11" # 代理所在主机（生产环境就是 docker LXC 的 IP）
-export PROXY_PORT="10808"          # HTTP 与 SOCKS5 同端口
-```
+export DOCKER_IP="192.168.110.11"
+export PROXY_HOST="192.168.110.11"
+export PROXY_PORT="10808"
 
-> 教程里的 `/24` 是示例。如果你的网段是 `/16` 或 `/25`，把 `$PREFIX` 改成实际值，并把下面命令中的 `/24` 替换为 `/$PREFIX`。
-
-> 模板 LXC 的 IP 只用于创建期验证；转成模板后不再启动，用户 LXC 克隆时会覆盖 `net0`。
-
----
-
-## 1. 创建 LXC（8G 盘）
-
-```bash
-pct create 900 "$TMPL" \
-  --hostname oc-template \
-  --unprivileged 1 \
-  --features nesting=1 \
-  --cores 2 \
-  --memory 2048 \
-  --swap 1024 \
-  --rootfs local-lvm:8 \
-  --net0 "name=eth0,bridge=$BRIDGE,ip=$TEMPLATE_IP/24,gw=$GATEWAY" \
-  --onboot 0 \
-  --start 1
-```
-
-说明：
-
-- `--unprivileged 1`：容器内 root 映射到宿主 `100000`，隔离更稳。
-- `--features nesting=1`：允许容器内运行嵌套工具（playwright 等需要）。
-- `--rootfs local-lvm:8`：8G 足够装模板；用户克隆后用 `pct resize` 扩到 24G。
-- `--start 1`：创建后立即启动，方便安装。
-
-如果 `local-lvm` 不存在，用 `pvesm status` 查实际存储名替换。
-
-### 1.1 配置出站代理（安装软件前）
-
-生产环境用户 LXC 不能直连外网，所有出站流量走 docker LXC 上的代理（HTTP 与 SOCKS5 同为 `10808`）。**先配代理，再 `apt install` 和下载 opencode**，否则后半段会卡住。
-
-```bash
-pct push 900 deploy/lxc/proxy.env.example /etc/opencode/proxy.env
-pct exec 900 -- env PROXY_HOST="$PROXY_HOST" PROXY_PORT="$PROXY_PORT" bash -c '
-set -e
-# 统一改成实际代理地址（示例文件默认 192.168.110.11）
-sed -i "s/192\.168\.110\.11/$PROXY_HOST/g" /etc/opencode/proxy.env
+mkdir -p /etc/opencode
+umask 077
+cat > /etc/opencode/proxy.env <<EOF
+# 出站代理配置（随模板克隆到每个用户 LXC，不需要逐台修改）。
+# 权限 600，不要提交到任何仓库。
+HTTP_PROXY=http://$PROXY_HOST:$PROXY_PORT
+HTTPS_PROXY=http://$PROXY_HOST:$PROXY_PORT
+http_proxy=http://$PROXY_HOST:$PROXY_PORT
+https_proxy=http://$PROXY_HOST:$PROXY_PORT
+ALL_PROXY=socks5h://$PROXY_HOST:$PROXY_PORT
+all_proxy=socks5h://$PROXY_HOST:$PROXY_PORT
+# 本机与内网直连，避免把内网流量绕到代理上。
+NO_PROXY=localhost,127.0.0.1,::1,$PROXY_HOST,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+no_proxy=localhost,127.0.0.1,::1,$PROXY_HOST,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+EOF
 chmod 600 /etc/opencode/proxy.env
 
-# 登录 shell 自动加载代理变量（/etc/opencode/proxy.env 是唯一来源）
-cat > /etc/profile.d/99-proxy.sh <<"EOF"
-# 出站代理，由模板预置；不要手工 export，改 /etc/opencode/proxy.env 即可
+# 登录 shell 自动加载
+cat > /etc/profile.d/99-proxy.sh <<'EOF'
 if [ -r /etc/opencode/proxy.env ]; then
     set -a
     . /etc/opencode/proxy.env
@@ -95,218 +152,191 @@ cat > /etc/apt/apt.conf.d/99proxy <<EOF
 Acquire::http::Proxy "http://$PROXY_HOST:$PROXY_PORT";
 Acquire::https::Proxy "http://$PROXY_HOST:$PROXY_PORT";
 EOF
-'
+
+# 当前会话立即生效（profile.d 只在登录时读）
+set -a
+. /etc/opencode/proxy.env
+set +a
 ```
 
-验证代理可用（`pct exec` 默认没有环境变量，用 `bash -l` 才会加载 `/etc/profile.d/99-proxy.sh`）：
+验证代理：
 
 ```bash
-pct exec 900 -- bash -lc 'env | grep -i proxy'
-pct exec 900 -- bash -lc 'curl -fsS -o /dev/null -w "%{http_code}\n" https://api.github.com'
-# 期望输出 200
+env | grep -i proxy
+curl -fsS -o /dev/null -w '%{http_code}\n' https://api.github.com   # 期望 200
 ```
 
 说明：
 
 - `opencode-serve.service` 里有 `EnvironmentFile=-/etc/opencode/proxy.env`，opencode 及其启动的所有命令都会继承代理变量。
 - 代理配置随模板克隆，**每个用户 LXC 自动带上**，`add-user.sh` 不需要再写。
-- `NO_PROXY` 已包含 `localhost`、`127.0.0.1` 和私有网段，内网访问不绕代理。
-- 有额外需要直连的域名时，往 `NO_PROXY` 里追加具体域名即可；不要删除 `127.0.0.1`（opencode 依赖回环通信）。
+- `NO_PROXY` 保留 `127.0.0.1`——opencode 依赖回环通信。
 - `git` / `pip` 的系统级代理在 §2 装完软件后再写（此时 `git` 才存在）。
+- 以上变量只在当前会话有效，重新登录或重开控制台后需要重新 `export`。
 
 ---
 
 ## 2. 安装基础软件包
 
+**容器控制台**：
+
 ```bash
-pct exec 900 -- bash -c '
-set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  ca-certificates \
-  curl \
-  git \
-  python3 \
-  python3-venv \
-  python3-pip \
-  jq \
-  unzip \
-  xz-utils \
-  less \
-  file \
-  procps \
-  nftables \
-  tzdata
+  ca-certificates curl git bash coreutils \
+  python3 python3-venv python3-pip \
+  jq unzip xz-utils less file procps \
+  nftables tzdata
 apt-get clean
 rm -rf /var/lib/apt/lists/*
-'
 ```
 
-清单说明（约 40 MB）：
-
-| 包 | 用途 |
-| --- | --- |
-| `ca-certificates` | HTTPS 必需 |
-| `curl` | 安装 opencode、agent 下载 |
-| `git` | opencode 快照/撤销依赖 |
-| `python3` + `venv` + `pip` | 常用；venv 隔离 PEP 668 |
-| `jq` | JSON 处理 |
-| `unzip` / `xz-utils` | 解压常见格式 |
-| `less` / `file` / `procps` | 排查工具 |
-| `nftables` | 限制 4096 端口来源 |
-| `tzdata` | 时区 |
-
-**不安装**：`nodejs`/`npm`、`build-essential`、`postgresql-client`、`default-mysql-client`、`ripgrep`、`fonts-noto-cjk`。需要时由用户任务自己 `apt install`。
-
-装完 `git` 后，再补系统级代理（`pct exec` 不加载 `/etc/profile.d`，所以写进配置文件而不是依赖环境变量）：
+装完 `git` 后补系统级代理：
 
 ```bash
-pct exec 900 -- bash -lc '
-set -e
 git config --system http.proxy "$HTTP_PROXY"
-git config --system https.proxy "$HTTPS_PROXY"
+git config --system https.proxy "$HTTP_PROXY"
 mkdir -p /etc
 cat > /etc/pip.conf <<EOF
 [global]
 proxy = $HTTP_PROXY
 EOF
-'
 ```
 
-> `bash -lc` 会加载 `/etc/profile.d/99-proxy.sh`，因此这里能直接引用 `$HTTP_PROXY` / `$HTTPS_PROXY`。
+**不安装**：`nodejs`/`npm`、`build-essential`、`postgresql-client`、`default-mysql-client`、`ripgrep`、`fonts-noto-cjk`。需要时由用户任务自己 `apt install`。
+
+### 2.1 取仓库文件
+
+后面要用的 `opencode-serve.service`、`opencode.jsonc`、`workspace-AGENTS.md`、`scripts/smoke-test.sh` 都在仓库里。
+
+**容器控制台**（走代理克隆）：
+
+```bash
+git clone --depth 1 https://github.com/francisgao1999/feishu-bridge.git /root/feishu-bridge
+cd /root/feishu-bridge
+ls deploy/lxc scripts
+```
+
+克隆失败（仓库私有、网络不通）时，改用**宿主 Shell** 推送：把仓库放到 PVE 宿主上，然后
+
+```bash
+pct push 900 /path/to/feishu-bridge/deploy/lxc/opencode-serve.service /tmp/opencode-serve.service
+pct push 900 /path/to/feishu-bridge/deploy/lxc/opencode.jsonc /tmp/opencode.jsonc
+pct push 900 /path/to/feishu-bridge/deploy/lxc/workspace-AGENTS.md /tmp/workspace-AGENTS.md
+pct push 900 /path/to/feishu-bridge/scripts/smoke-test.sh /tmp/smoke-test.sh
+```
+
+> 仓库只在安装期用，转模板前会删掉（§8），不会留在用户 LXC 里。
 
 ---
 
-## 3. 安装 opencode 2.3.2
+## 3. 安装 opencode
 
-固定版本，避免升级破坏 `fs/write` 等 experimental 接口。
+固定版本 2.3.2，`fs/write` 是 experimental 接口，升级前必须先跑冒烟测试。
+
+**容器控制台**：
 
 ```bash
-pct exec 900 -- bash -lc '
-set -e
 curl -fsSL https://opencode.ai/install | bash -s -- --version 2.3.2
 install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode
-/usr/local/bin/opencode --version
-'
+opencode --version        # 期望 2.3.2
 ```
 
-> 这里用 `bash -lc`（登录 shell）是为了加载 `/etc/profile.d/99-proxy.sh`，让下载走代理；`bash -c` 不会读该文件。
-
-预期输出：`2.3.2`。
-
-> 如果容器内没有外网，先把二进制拷进去：
-> `pct push 900 ./opencode /usr/local/bin/opencode --perms 0755`。
+> 下载走代理，当前会话的 `$HTTPS_PROXY` 已在 §1.4 加载。
 
 ---
 
 ## 4. 创建目录与配置
 
+**容器控制台**：
+
 ```bash
-pct exec 900 -- bash -c '
-set -e
 mkdir -p /workspace/uploads /workspace/outbox
 mkdir -p /etc/opencode/opencode
 mkdir -p /var/lib/opencode /var/cache/opencode
 chmod 700 /etc/opencode
-'
 ```
 
-### 4.1 写入 systemd 单元
-
-从仓库拷入：
+### 4.1 systemd 单元
 
 ```bash
-pct push 900 deploy/lxc/opencode-serve.service /etc/systemd/system/opencode-serve.service
+cp /root/feishu-bridge/deploy/lxc/opencode-serve.service /etc/systemd/system/
+chmod 644 /etc/systemd/system/opencode-serve.service
 ```
 
-内容应包含：
+单元内容要点：
 
-```ini
-[Unit]
-Description=OpenCode V2 API server (per-user sandbox)
-After=network-online.target
-Wants=network-online.target
+- `EnvironmentFile=-/etc/opencode/proxy.env` 在最前，保证代理变量先加载；
+- 后面依次加载 `service.env`、`serve.env`（`-` 表示文件不存在不报错）；
+- `ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --port 4096`；
+- `WorkingDirectory=/workspace`，`XDG_CONFIG_HOME=/etc/opencode`。
 
-[Service]
-Type=simple
-User=root
-Group=root
-WorkingDirectory=/workspace
-Environment=HOME=/root
-Environment=XDG_CONFIG_HOME=/etc/opencode
-Environment=XDG_DATA_HOME=/var/lib/opencode
-Environment=XDG_STATE_HOME=/var/lib/opencode/state
-Environment=XDG_CACHE_HOME=/var/cache/opencode
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=-/etc/opencode/service.env
-EnvironmentFile=-/etc/opencode/serve.env
-ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --port 4096 --print-logs --log-level info
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### 4.2 写入 opencode 配置
+### 4.2 opencode 配置
 
 ```bash
-pct push 900 deploy/lxc/opencode.jsonc /etc/opencode/opencode/opencode.jsonc
+cp /root/feishu-bridge/deploy/lxc/opencode.jsonc /etc/opencode/opencode/opencode.jsonc
 ```
 
-然后**手工编辑**，填入模型服务商的 API Key（或改用 `service.env` 里的环境变量）：
+然后填模型服务商的 API Key（也可以放到 §4.4 的 `service.env`）：
 
 ```bash
-pct exec 900 -- nano /etc/opencode/opencode/opencode.jsonc
+nano /etc/opencode/opencode/opencode.jsonc
 ```
 
-确认读取路径：
+确认配置路径：
 
 ```bash
-pct exec 900 -- /usr/local/bin/opencode debug config
+opencode debug config | head -20
 ```
 
-输出里的 `config` 路径应为 `/etc/opencode/opencode/opencode.jsonc`。若不同，按实际路径调整。
+输出里的 `config` 应为 `/etc/opencode/opencode/opencode.jsonc`。
 
-> 克隆使用 `pct clone --full`，模板里的 `opencode.jsonc`、`/workspace/AGENTS.md`、`/etc/opencode/proxy.env` 会**完整复制**到每个用户 LXC，不是每次新建。反过来，模板改完后**不会**同步到已开通的用户，需要逐台 `pct exec` 下发或重建 LXC。
-
-### 4.3 写入工作区约定
+### 4.3 工作区约定
 
 ```bash
-pct push 900 deploy/lxc/workspace-AGENTS.md /workspace/AGENTS.md
+cp /root/feishu-bridge/deploy/lxc/workspace-AGENTS.md /workspace/AGENTS.md
 ```
 
-该文件已包含「网络与代理」一节，告诉 opencode 出站必须走代理、各工具如何显式指定代理、哪些配置不要改。**不要**为了省事删掉这一段，否则 agent 遇到外网工具时会自己改配置。
+该文件含「网络与代理」一节，告诉 opencode 出站走代理、各工具如何显式指定、哪些配置不要改。**不要**删掉这一段。
 
-### 4.4 写入模型密钥（可选）
+### 4.4 模型密钥（可选）
 
 ```bash
-pct exec 900 -- bash -c '
 umask 077
 cat > /etc/opencode/service.env <<EOF
-SYSTALYZE_API_KEY=replace-me
+SYSTALYZE_API_KEY=<你的 key>
 EOF
-'
 ```
+
+### 4.5 克隆行为说明
+
+`add-user.sh` 用 `pct clone --full` 克隆，模板里的 `opencode.jsonc`、`/workspace/AGENTS.md`、`/etc/opencode/proxy.env` 会**完整复制**到每个用户 LXC，不是每次重新生成。
+
+反过来，模板改完后**不会**同步到已开通的用户，需要逐台下发或重建 LXC。
 
 ---
 
-## 5. 配置 nftables（只放行 docker LXC 访问 4096）
+## 5. 配置 nftables
+
+先确认 `$DOCKER_IP` 在当前会话里：
 
 ```bash
-pct exec 900 -- bash -c "
-umask 022
-cat > /etc/nftables.conf <<'EOF'
+echo "$DOCKER_IP"
+```
+
+**容器控制台**：
+
+```bash
+cat > /etc/nftables.conf <<EOF
 #!/usr/sbin/nft -f
 flush ruleset
 
 table inet filter {
   chain input {
     type filter hook input priority 0; policy drop;
-    iif lo accept
     ct state established,related accept
-    icmp type echo-request accept
+    iif lo accept
     ip saddr $DOCKER_IP tcp dport 4096 accept
   }
   chain forward {
@@ -317,114 +347,141 @@ table inet filter {
   }
 }
 EOF
+
 systemctl enable --now nftables
 nft list ruleset
-"
 ```
 
-> 注意：`$DOCKER_IP` 是**宿主 shell** 变量，`pct exec ... bash -c "..."` 的双引号会展开它。如果不想展开，改成单引号并手工替换。
+> 非特权 LXC 里 nftables 加载失败时，可退化为 `iptables`，或暂时不启用（bridge 仍用 basic auth）。不要为此关闭 basic auth。
 
-确认规则生效：
+### 5.1 关于转模板时是否保留 nftables
+
+`add-user.sh` 的健康检查和冒烟测试都从 **PVE 宿主**发起，而上面规则只放行 `$DOCKER_IP`。所以默认在 §8 转模板前**禁用** nftables，克隆出来的用户 LXC 不会带端口限制。
+
+如果你希望克隆后仍限制来源，改成同时放行 docker LXC 和 PVE 宿主，并在 §8 保留 `nftables` 启用：
 
 ```bash
-pct exec 900 -- nft list ruleset | grep -A2 'dport 4096'
+# 把 input 链里的放行行替换为：
+ip saddr { $DOCKER_IP, <PVE_IP> } tcp dport 4096 accept
 ```
 
-> 如果 nftables 在非特权 LXC 里加载失败，可退化为 `iptables`，或暂时不启用（bridge 仍用 basic auth）。**不要**因此关闭 basic auth。
+改完重新 `systemctl restart nftables`，并确认 `add-user.sh` 的健康检查能通过。
 
 ---
 
 ## 6. 启动并验证
 
-```bash
-pct exec 900 -- systemctl daemon-reload
-pct exec 900 -- systemctl enable --now opencode-serve
-pct exec 900 -- systemctl status opencode-serve --no-pager
-```
-
-健康检查（模板 LXC 内自测）：
+**容器控制台**：
 
 ```bash
-pct exec 900 -- curl -fsS http://127.0.0.1:4096/global/health
+systemctl daemon-reload
+systemctl enable --now opencode-serve
+systemctl status opencode-serve --no-pager
 ```
 
-确认服务进程真的拿到了代理变量（`EnvironmentFile=-/etc/opencode/proxy.env`）：
+健康检查（容器内回环，nftables 已放行 `lo`）：
 
 ```bash
-pct exec 900 -- systemctl show opencode-serve -p Environment \
-  | tr ' ' '\n' | grep -i proxy
-# 应能看到 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
-pct exec 900 -- bash -lc 'curl -fsS -o /dev/null -w "%{http_code}\n" https://api.github.com'
-# 期望 200；失败说明代理不通，先查 1.1
+curl -fsS http://127.0.0.1:4096/global/health
 ```
 
-从宿主机验证鉴权（需要 `serve.env` 里的密码；模板期还没写密码，先手工写一个临时密码）：
+确认服务进程真的拿到了代理变量：
 
 ```bash
-# 同时写两个变量：2.3.x 读 OPENCODE_PASSWORD，更新的版本读 OPENCODE_SERVER_PASSWORD。
-pct exec 900 -- sh -c "umask 077; printf 'OPENCODE_PASSWORD=template-temp\nOPENCODE_SERVER_PASSWORD=template-temp\n' > /etc/opencode/serve.env"
-pct exec 900 -- systemctl restart opencode-serve
-curl -fsS -u opencode:template-temp "http://$TEMPLATE_IP:4096/global/health"
-curl -s -o /dev/null -w '%{http_code}\n' "http://$TEMPLATE_IP:4096/api/model"   # 期望 401
+systemctl show opencode-serve -p Environment | tr ' ' '\n' | grep -i proxy
+curl -fsS -o /dev/null -w '%{http_code}\n' https://api.github.com   # 期望 200
 ```
 
-> `serve.env` 里的临时密码会被克隆到每个用户 LXC，`add-user.sh` 会立即覆盖成随机密码，所以模板里用什么值都行。
+设置模板期临时密码并验证鉴权：
+
+```bash
+umask 077
+printf 'OPENCODE_PASSWORD=template-temp\nOPENCODE_SERVER_PASSWORD=template-temp\n' > /etc/opencode/serve.env
+systemctl restart opencode-serve
+sleep 2
+
+curl -fsS -u opencode:template-temp http://127.0.0.1:4096/global/health
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4096/api/model   # 期望 401
+```
+
+> 同时写 `OPENCODE_PASSWORD` 和 `OPENCODE_SERVER_PASSWORD`：2.3.2 读前者，新版本读后者。
+> 这个临时密码会被克隆到用户 LXC，`add-user.sh` 会立即覆盖成随机密码，所以模板里用什么值都行。
 
 ---
 
 ## 7. 跑冒烟测试
 
-在仓库目录（或任意有 `scripts/smoke-test.sh` 的位置）执行：
+**容器控制台**（`smoke-test.sh` 需要 `curl`、`python3`、`sha256sum`，§2 已装）：
 
 ```bash
-./scripts/smoke-test.sh --url "http://$TEMPLATE_IP:4096" --password template-temp
+cd /root/feishu-bridge
+./scripts/smoke-test.sh --url http://127.0.0.1:4096 --password template-temp
 ```
 
 全部 ✅ 后再继续。冒烟覆盖：
 
 1. `/global/health` 200
-2. `/api/model` 无认证 401
+2. `/api/model` 无认证 401、带认证 200
 3. `fs/write` 写 2 MB
 4. `fs/read` 读回 sha256 一致
 5. `/api/event` SSE 200
 
-失败时按提示排查，**不要**把失败的模板转成模板。
+失败就排查，**不要把失败的模板转成模板**。
 
 ---
 
 ## 8. 写入就绪标记并转模板
 
+### 8.1 清理模板
+
+**容器控制台**：
+
 ```bash
-pct exec 900 -- bash -c '
-set -e
 systemctl disable opencode-serve
-systemctl disable nftables
-rm -f /etc/opencode/serve.env
-touch /etc/opencode/ready
-'
-pct stop 900
-pct template 900
+systemctl disable nftables        # 见 §5.1；保留端口限制的话跳过这行
+rm -f /etc/opencode/serve.env     # 删掉模板期临时密码
+rm -rf /root/feishu-bridge        # 仓库只在安装期用
+touch /etc/opencode/ready         # add-user.sh 等待的就绪标记
 ```
 
-说明：
+> 可选：`passwd -l root` 锁定 root 密码。用户 LXC 不装 SSH，登录入口只有 PVE 控制台 / `pct enter`，锁定不影响 opencode 以 root 运行。
 
-- `disable` 后 `add-user.sh` 会 `systemctl enable --now` 重新启用。
-- 删除模板期的临时 `serve.env`，避免克隆后残留弱密码。
-- `/etc/opencode/ready` 是 `add-user.sh` 等待的就绪标记。
-- `pct template 900` 之后 LXC 不能再启动，只能克隆。
+### 8.2 转成模板
+
+**网页控制台**：
+
+1. 选中 `900 (oc-template)` → `停止`（或右键 `关机`）。
+2. 确认状态是 `已停止`。
+3. 右键 `900` → `转换成模板`（`More` → `Convert to template`）。
+
+转完后 CT 900 显示模板图标，不能再启动，只能克隆。
+
+> 也可以用**宿主 Shell**：`pct stop 900 && pct template 900`。
 
 ---
 
 ## 9. 验收清单
 
-- [ ] `pct config 900` 显示 `template: 1`、`rootfs` 8G
-- [ ] `pct exec 900` 已不可用（模板不能启动）
-- [ ] 克隆测试：`pct clone 900 999 --full && pct start 999`，容器内 `/etc/opencode/ready` 存在
-- [ ] 克隆测试后删除：`pct stop 999 && pct destroy 999`
-- [ ] `/etc/opencode/proxy.env` 存在、权限 600，`systemctl show opencode-serve -p Environment` 能看到代理变量
-- [ ] `bash -lc 'curl https://api.github.com'` 返回 200
-- [ ] `/workspace/AGENTS.md` 含「网络与代理」一节
-- [ ] 冒烟测试通过（模板期已跑）
+**宿主 Shell**：
+
+```bash
+pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
+```
+
+逐项确认：
+
+- [ ] `template: 1`，`rootfs` 为 8G
+- [ ] `memory: 2048`、`swap: 1024`、`cores: 2`
+- [ ] `features: nesting=1`
+- [ ] `pct start 900` 报错（模板不能启动）
+- [ ] 克隆测试：`pct clone 900 999 --full && pct start 999`
+- [ ] 克隆内 `/etc/opencode/ready` 存在
+- [ ] 克隆内 `systemctl show opencode-serve -p Environment` 能看到代理变量
+- [ ] 克隆内 `bash -lc 'curl -s -o /dev/null -w "%{http_code}" https://api.github.com'` 返回 200
+- [ ] 克隆内 `/workspace/AGENTS.md` 含「网络与代理」一节
+- [ ] 克隆内 `/root/feishu-bridge` 已不存在
+- [ ] 冒烟测试已通过（§7）
+- [ ] 清理测试容器：`pct stop 999 && pct destroy 999`
 
 ---
 
@@ -432,26 +489,28 @@ pct template 900
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `opencode serve` 启动即退出 | 缺 `ca-certificates` 或 `bash` | `apt install -y ca-certificates bash` |
-| `fs/write` 返回 404 | opencode 版本变了 | 固定回 2.3.2；升级前先跑冒烟 |
-| `curl` 连不上 4096 | nftables 拦了 | 检查 `ip saddr` 是否为 docker LXC 的 IP |
-| 配置不生效 | 读的不是 `/etc/opencode/...` | `opencode debug config` 看实际路径 |
-| 磁盘满 | 用户装了数据库 | `pct resize <vmid> rootfs 32G` |
-| 内存不够 | 同时跑 PG + MySQL | `pct set <vmid> --memory 3072` |
-| `curl` / `apt` 超时 | 代理没配或地址错 | `pct exec 900 -- bash -lc 'env \| grep -i proxy'`；检查 `/etc/opencode/proxy.env`、`/etc/apt/apt.conf.d/99proxy` |
-| opencode 调用模型超时 | 服务没拿到代理变量 | `systemctl show opencode-serve -p Environment \| tr ' ' '\n' \| grep -i proxy`；确认单元里有 `EnvironmentFile=-/etc/opencode/proxy.env` |
-| agent 自己 `unset` 代理后外网失败 | 工作区约定被改 | 重新 `pct push` `deploy/lxc/workspace-AGENTS.md` |
+| `apt update` 卡住/超时 | 代理没配或地址错 | 容器内 `cat /etc/apt/apt.conf.d/99proxy`；`curl -v https://deb.debian.org` |
+| `curl` 外网超时 | 当前会话没加载代理 | `set -a; . /etc/opencode/proxy.env; set +a` |
+| opencode 下载失败 | 代理不通 | 先 `curl -I https://opencode.ai` 确认 200 |
+| `opencode serve` 启动即退出 | 缺依赖 | `journalctl -u opencode-serve -n 50 --no-pager` |
+| `fs/write` 返回 404 | 版本不对 | 确认 `opencode --version` 是 2.3.2 |
+| 4096 从别的机器连不上 | nftables 只放行 `$DOCKER_IP` | 正常；需要时按 §5.1 放行 |
+| 从 PVE 宿主 curl 4096 超时 | 同上 | 正常；健康检查请在容器内打 `127.0.0.1` |
+| nftables 启动失败 | 非特权 LXC 限制 | 退化为 iptables，或暂时不启用 |
+| 克隆后 opencode 起不来 | 模板没 `disable` 或没写 `ready` | 检查 §8.1 |
+| 克隆后外网不通 | 模板缺 `/etc/opencode/proxy.env` | 按 §1.4 重建模板 |
 
 ---
 
 ## 11. 升级 opencode 的流程
 
-模板一旦转成模板就不能启动。升级需要：
+模板不能启动，升级要克隆一个临时容器来做：
 
-1. 从模板克隆一个临时 LXC（如 `999`）
-2. 按 §3 安装新版本
-3. 按 §7 跑冒烟测试
-4. 通过后删除临时 LXC，并重新创建模板（或直接 `pct template` 新 LXC）
-5. 已有的用户 LXC 需要单独升级（`pct exec <id> -- ...` 或重建）
+1. **宿主 Shell**：`pct clone 900 999 --full && pct start 999`
+2. **容器控制台**（进入 999）：按 §3 装新版本，`opencode --version` 确认
+3. 按 §7 跑冒烟测试，全部通过
+4. **宿主 Shell**：`pct stop 999 && pct destroy 999`
+5. 重建模板（重新走 §1–§8），或按需逐台升级已有用户 LXC
+6. 已有用户 LXC 升级后必须跑 `/smoke` 或服务器侧冒烟
 
 **每次升级 opencode 都必须跑冒烟测试**，见 `AGENTS.md`。
