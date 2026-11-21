@@ -8,6 +8,29 @@
   "experimental": {
     "todo": true
   },
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      // 模板已全局安装 @playwright/mcp 和 Chromium，直接用全局命令，避免每次启动走 npx 下载。
+      // 容器内以 root 运行，Chromium 必须加 --no-sandbox；无显示器，必须 --headless。
+      "command": [
+        "playwright-mcp",
+        "--headless",
+        "--browser",
+        "chromium",
+        "--no-sandbox",
+        "--isolated",
+        "--ignore-roots",
+        "--output-dir",
+        "/workspace/outbox",
+        "--proxy-server",
+        "http://192.168.110.11:10808",
+        "--proxy-bypass",
+        "localhost,127.0.0.1"
+      ],
+      "enabled": true
+    }
+  },
   "model": "systalyze/deepseek-ai/DeepSeek-V4.1-Flash-1017",
   "agents": {
     "build": {

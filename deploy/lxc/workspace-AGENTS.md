@@ -24,12 +24,16 @@ python3 -c "import matplotlib" 2>/dev/null || apt-get install -y python3-matplot
 python3 chart.py /workspace/outbox/chart.png
 ```
 
-需要浏览器截图时先装 Node.js（模板默认不装）：
+需要浏览器截图时，用已配置好的 Playwright MCP 工具（`browser_navigate`、`browser_take_screenshot` 等），不要自己 `apt install nodejs` 或 `npm install playwright`：
+
+1. `browser_navigate` 打开目标页
+2. `browser_take_screenshot`，`filename` 写 `/workspace/outbox/shot.png`（MCP 默认输出目录也是 `/workspace/outbox`）
+3. 截图写完，桥接器会在任务结束后自动回传
+
+也可以直接用命令行截图（Playwright 已全局安装）：
 
 ```bash
-export DEBIAN_FRONTEND=noninteractive
-apt-get install -y nodejs npm
-npx playwright screenshot --viewport-size=1280,800 https://example.com /workspace/outbox/shot.png
+playwright screenshot --viewport-size=1280,800 https://example.com /workspace/outbox/shot.png
 ```
 
 不要重复写同名文件——桥接器按内容 sha256 去重，内容相同只发一次。

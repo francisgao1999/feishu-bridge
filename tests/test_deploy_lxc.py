@@ -43,6 +43,41 @@ class ProxyConfigTest(unittest.TestCase):
         self.assertIn("出站代理", text)
 
 
+class PlaywrightMcpConfigTest(unittest.TestCase):
+    """模板预装 Playwright MCP，配置改动要保证无显示器、root、走代理都能跑。"""
+
+    def test_opencode_config_enables_playwright_mcp(self):
+        text = (LXC_DIR / "opencode.jsonc").read_text(encoding="utf-8")
+        self.assertIn('"playwright"', text)
+        self.assertIn('"playwright-mcp"', text)
+        # 容器内无显示器且以 root 运行
+        self.assertIn('"--headless"', text)
+        self.assertIn('"--no-sandbox"', text)
+        self.assertIn('"--browser"', text)
+        self.assertIn('"chromium"', text)
+        # 浏览器必须显式走代理，否则打不开外网
+        self.assertIn('"--proxy-server"', text)
+        self.assertIn("192.168.110.11:10808", text)
+        # 截图默认写进 outbox，桥接器才能回传
+        self.assertIn("/workspace/outbox", text)
+
+    def test_workspace_agents_points_to_mcp(self):
+        text = (LXC_DIR / "workspace-AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("Playwright MCP", text)
+        self.assertIn("browser_take_screenshot", text)
+        self.assertIn("/workspace/outbox", text)
+        # 不应再让 agent 临时装 Node.js
+        self.assertNotIn("apt-get install -y nodejs npm", text)
+
+    def test_template_manual_installs_playwright(self):
+        text = (REPO_ROOT / "docs" / "lxc-template-manual.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("npm install -g @playwright/mcp", text)
+        self.assertIn("playwright install --with-deps chromium", text)
+        self.assertIn("ms-playwright", text)
+
+
 class AddUserVmidTest(unittest.TestCase):
     """用户 LXC 默认从 901 起编号，避免和基础设施 VMID 混在一起。"""
 

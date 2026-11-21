@@ -188,6 +188,7 @@ apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates curl git bash coreutils \
   python3 python3-venv python3-pip \
+  nodejs npm \
   jq unzip xz-utils less file procps \
   nftables tzdata
 apt-get clean
@@ -204,9 +205,13 @@ cat > /etc/pip.conf <<EOF
 [global]
 proxy = $HTTP_PROXY
 EOF
+npm config set proxy "$HTTP_PROXY" --location=global
+npm config set https-proxy "$HTTP_PROXY" --location=global
 ```
 
-**不安装**：`nodejs`/`npm`、`build-essential`、`postgresql-client`、`default-mysql-client`、`ripgrep`、`fonts-noto-cjk`。需要时由用户任务自己 `apt install`。
+**不安装**：`build-essential`、`postgresql-client`、`default-mysql-client`、`ripgrep`。需要时由用户任务自己 `apt install`。
+
+`nodejs`/`npm` 预装，供 Playwright MCP 使用；`fonts-noto-cjk` 在 §2.3 安装。
 
 ### 2.1 取仓库文件
 
@@ -259,6 +264,40 @@ chmod 644 /etc/default/locale
 `C.UTF-8` 是 glibc 内置，不需要 `locale-gen`。重新登录控制台后生效，模板克隆后每个用户 LXC 自动继承。
 
 > 已经在容器里时，也可以执行 `localectl set-locale LANG=C.UTF-8`（如果系统装了 `systemd` 的 `localectl`），效果相同。
+
+### 2.3 安装 Playwright MCP 与 Chromium
+
+模板预装 Playwright MCP，用户让 agent 截图时不必再临时 `apt install nodejs npm`。
+
+**容器控制台**：
+
+```bash
+# 先取 MCP 依赖的 Playwright 版本，保证浏览器 revision 和 MCP 对得上
+PW_VERSION=$(npm view @playwright/mcp@latest dependencies.playwright)
+npm install -g @playwright/mcp@latest "playwright@$PW_VERSION"
+playwright install --with-deps chromium
+```
+
+- `npm install -g` 把 `playwright-mcp` 和 `playwright` 两个命令装到 `/usr/local/bin`，`opencode.jsonc` 里的 MCP 直接调用全局命令，不走 `npx` 下载。
+- 必须装同版本的 `playwright`：`@playwright/mcp` 依赖的版本可能不是稳定版，版本不一致会导致 MCP 找不到已下载的 Chromium。
+- `playwright install --with-deps chromium` 下载 Chromium 到 `/root/.cache/ms-playwright`，并安装运行所需的系统库。下载走代理，命令可能跑几分钟。
+- 容器内以 root 运行，`opencode.jsonc` 已给 MCP 加 `--no-sandbox`；无显示器，已加 `--headless`。
+
+验证：
+
+```bash
+command -v playwright-mcp playwright
+playwright --version
+ls /root/.cache/ms-playwright
+```
+
+需要截中文页面时再装字体（约 200 MB，非必需）：
+
+```bash
+apt-get install -y --no-install-recommends fonts-noto-cjk
+```
+
+> 浏览器缓存目录 `/root/.cache/ms-playwright` 会随模板克隆到每个用户 LXC，转模板前不要删。
 
 ---
 
@@ -313,6 +352,8 @@ chmod 644 /etc/systemd/system/opencode-serve.service
 ```bash
 cp /root/feishu-bridge/deploy/lxc/opencode.jsonc /etc/opencode/opencode/opencode.jsonc
 ```
+
+该文件已内置 `playwright` MCP：调用全局 `playwright-mcp`，固定 `--headless --browser chromium --no-sandbox --isolated`，并把浏览器代理指向 `192.168.110.11:10808`。模板地址变了要同步改这里。
 
 然后填模型服务商的 API Key（也可以放到 §4.4 的 `service.env`）：
 
@@ -484,6 +525,8 @@ touch /etc/opencode/ready                # add-user.sh 等待的就绪标记
 
 > `nftables` 保持启用（见 §5.1），克隆出来的用户 LXC 会继承端口限制。
 
+> **不要删** `/root/.cache/ms-playwright`（§2.3 下载的 Chromium），否则克隆出来的用户 LXC 还要重新下载浏览器。
+
 > 可选：`passwd -l root` 锁定 root 密码。用户 LXC 不装 SSH，登录入口只有 PVE 控制台 / `pct enter`，锁定不影响 opencode 以 root 运行。
 
 ### 8.2 转成模板
@@ -522,6 +565,8 @@ pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
 - [ ] 克隆内 `PID=$(systemctl show -p MainPID --value opencode-serve); tr '\0' '\n' < /proc/$PID/environ | grep -i proxy` 有输出
 - [ ] 克隆内 `bash -lc 'curl -s -o /dev/null -w "%{http_code}" https://api.github.com'` 返回 200
 - [ ] 克隆内 `/workspace/AGENTS.md` 含「网络与代理」一节
+- [ ] 克隆内 `playwright --version` 有输出，`/root/.cache/ms-playwright` 里有 Chromium
+- [ ] 克隆内 `XDG_CONFIG_HOME=/etc/opencode opencode debug config | grep -i playwright` 能看到 MCP 配置
 - [ ] 克隆内 `/root/feishu-bridge` 已不存在
 - [ ] 冒烟测试已通过（§7）
 - [ ] 清理测试容器：`pct stop 999 && pct destroy 999`
@@ -544,6 +589,10 @@ pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
 | nftables 启动失败 | 非特权 LXC 限制 | 退化为 iptables，或暂时不启用 |
 | 克隆后 opencode 起不来 | 模板没 `disable` 或没写 `ready` | 检查 §8.1 |
 | 克隆后外网不通 | 模板缺 `/etc/opencode/proxy.env` | 按 §1.4 重建模板 |
+| agent 截图时仍 `apt install nodejs` | 模板没装 Node.js，或用户 LXC 是旧模板克隆的 | 按 §2.3 装；旧用户 LXC 需逐台补装或重建 |
+| Playwright MCP 启动失败 | 缺系统库或 Chromium 没下载 | `playwright install --with-deps chromium`；`journalctl -u opencode-serve -n 50 --no-pager` |
+| Chromium 报 sandbox 错误 | 容器内以 root 运行 | `opencode.jsonc` 里已有 `--no-sandbox`，确认没被覆盖 |
+| 截图空白/超时 | 浏览器没走代理 | 检查 MCP 的 `--proxy-server` 是否是 `192.168.110.11:10808` |
 
 ---
 

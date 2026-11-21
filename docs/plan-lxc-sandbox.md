@@ -10,7 +10,7 @@
 1. 文件与图片**双向**：入站 `file`/`image`，出站 `/workspace/outbox` 约定（§6.4、§6.9）
 2. 上传上限维持 **100 MB**（飞书硬限制，非 OpenCode 限制），超限翻译为可执行建议
 3. 用户 LXC 资源默认 **2048M / swap 1024M / 24G**（§7.3、§9.2）
-4. 模板默认软件包清单定稿：不装 `nodejs`/`npm`、`build-essential`、`postgresql-client`、`default-mysql-client`（§9.1）
+4. 模板默认软件包清单定稿：预装 `nodejs`/`npm` 与 Playwright MCP + Chromium，不装 `build-essential`、`postgresql-client`、`default-mysql-client`（§9.1）
 5. 创建模板与用户 LXC **永远手动**，删除所有自动化设想（§7.6）
 6. IP 必须由管理员显式传入；新增 `docs/lxc-scripts.md` 脚本手册（§7.8）
 7. 模板不设 root 密码，管理员用 `pct enter` 进入（§7.9）
@@ -702,8 +702,10 @@ volumes:
 | `jq` | ~1 MB | 非必需 | 处理 JSON 方便，体积小 |
 | `unzip` + `xz-utils` | ~2 MB | 非必需 | 解压常见格式 |
 | `less` + `file` + `procps` | ~2 MB | 非必需 | 排查问题时的基本工具 |
+| `nodejs` / `npm` | ~80 MB | 非必需 | 预装，供 Playwright MCP 使用 |
+| `@playwright/mcp` + `playwright` | ~20 MB | 非必需 | 全局安装，agent 截图用 |
+| Chromium（`playwright install chromium`） | ~300 MB | 非必需 | 预装到 `/root/.cache/ms-playwright` |
 | `fonts-noto-cjk` | ~200 MB | 非必需 | 仅当用户要 playwright 截中文页面才装 |
-| ~~`nodejs` / `npm`~~ | ~80 MB | 不装 | 用户任务需要时自行 `apt install` |
 | ~~`build-essential`~~ | ~200 MB | 不装 | 需要编译时用户自行 `apt install` |
 | ~~`postgresql-client`~~ | ~5 MB | 不装 | 用户装服务端时一起装 |
 | ~~`default-mysql-client`~~ | ~10 MB | 不装 | 用户装服务端时一起装 |
@@ -711,7 +713,7 @@ volumes:
 | ~~`sudo`~~ | — | 不装 | 容器内就是 root |
 | ~~`openssh-server`~~ | — | 不装 | 不开放 SSH |
 
-合计约 **40 MB**（不含可选字体）。手工创建模板时按此清单 `apt install`；每一项在教程里单独一行并带注释，方便后续增删。
+合计约 **450 MB**（不含可选字体；主要是 Chromium）。手工创建模板时按此清单 `apt install`；每一项在教程里单独一行并带注释，方便后续增删。
 
 **opencode 真正需要的只有**：`ca-certificates`、`git`（建议）、以及运行时可执行 `bash`。其余都可以按需装。
 
