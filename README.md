@@ -104,7 +104,7 @@ docker LXC（bridge 容器）
 
 按 [`docs/lxc-template-manual.md`](docs/lxc-template-manual.md) **手工**创建模板 LXC（VMID 900）：在 PVE 网页控制台用「创建 CT」向导建容器，再在容器控制台里装软件，最后转成模板。模板只创建一次，之后所有用户从它克隆。
 
-模板包含：Debian 最小系统 + `git`/`python3`/`curl`/`jq` 等约 40MB 工具、opencode v2（不固定小版本）、`/workspace`、`/workspace/uploads`、`/workspace/outbox`、`opencode-serve.service`，以及**出站代理**配置：`/etc/opencode/proxy.env`（默认 `192.168.110.11:10808`，HTTP 与 SOCKS5 同端口）、apt/git/pip 的系统级代理、`/etc/profile.d/99-proxy.sh`。代理随模板克隆，每个用户 LXC 自动继承。
+模板包含：Debian 最小系统 + `git`/`python3`/`curl`/`jq` 等约 40MB 工具、opencode v2（不固定小版本）、`LANG=C.UTF-8`（避免控制台中文乱码）、`/workspace`、`/workspace/uploads`、`/workspace/outbox`、`opencode-serve.service`，以及**出站代理**配置：`/etc/opencode/proxy.env`（默认 `192.168.110.11:10808`，HTTP 与 SOCKS5 同端口）、apt/git/pip 的系统级代理、`/etc/profile.d/99-proxy.sh`。代理随模板克隆，每个用户 LXC 自动继承。
 
 nftables 规则（仅放行 docker LXC 访问 4096）已写好，但 `add-user.sh` 的健康检查和冒烟测试从 PVE 宿主发起，所以**转模板时默认禁用**；需要保留端口限制时按教程 §5.1 放行 PVE 宿主再启用。
 

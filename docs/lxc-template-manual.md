@@ -38,6 +38,7 @@
 | `GATEWAY` | `192.168.110.1` | 网关 |
 | `BRIDGE` | `vmbr0` | 网桥 |
 | `DOCKER_IP` | `192.168.110.11` | 运行 bridge 的 docker LXC 的 IP |
+| `PVE_IP` | `192.168.110.10` | PVE 宿主 IP，`add-user.sh` 和冒烟测试从这里发起 |
 | `PROXY_HOST` | `192.168.110.11` | 代理地址，生产环境就是 docker LXC |
 | `PROXY_PORT` | `10808` | HTTP 与 SOCKS5 同端口 |
 
@@ -117,6 +118,7 @@ ip route | head -3       # 期望默认路由指向 GATEWAY
 
 ```bash
 export DOCKER_IP="192.168.110.11"
+export PVE_IP="192.168.110.10"
 export PROXY_HOST="192.168.110.11"
 export PROXY_PORT="10808"
 
@@ -245,6 +247,19 @@ chmod +x /root/feishu-bridge/scripts/smoke-test.sh
 
 > 仓库文件只在安装期用，转模板前会删掉（§8），不会留在用户 LXC 里。
 
+### 2.2 设置 locale（避免中文乱码）
+
+Debian 最小系统默认 `LANG=C`，在 PVE 控制台里粘贴或显示中文会乱码。装完软件包后设置：
+
+```bash
+printf 'LANG=C.UTF-8\n' > /etc/default/locale
+chmod 644 /etc/default/locale
+```
+
+`C.UTF-8` 是 glibc 内置，不需要 `locale-gen`。重新登录控制台后生效，模板克隆后每个用户 LXC 自动继承。
+
+> 已经在容器里时，也可以执行 `localectl set-locale LANG=C.UTF-8`（如果系统装了 `systemd` 的 `localectl`），效果相同。
+
 ---
 
 ## 3. 安装 opencode
@@ -305,13 +320,13 @@ cp /root/feishu-bridge/deploy/lxc/opencode.jsonc /etc/opencode/opencode/opencode
 nano /etc/opencode/opencode/opencode.jsonc
 ```
 
-确认配置路径：
+确认配置路径（`XDG_CONFIG_HOME` 要和 systemd 单元一致，否则会读 `/root/.config/opencode`）：
 
 ```bash
-opencode debug config | head -20
+XDG_CONFIG_HOME=/etc/opencode opencode debug config | head -20
 ```
 
-输出里的 `config` 应为 `/etc/opencode/opencode/opencode.jsonc`。
+v2 的输出是目录列表，能看到 `/etc/opencode` 即可；实际读取的是 `/etc/opencode/opencode/opencode.jsonc`。
 
 ### 4.3 工作区约定
 
@@ -340,10 +355,10 @@ EOF
 
 ## 5. 配置 nftables
 
-先确认 `$DOCKER_IP` 在当前会话里：
+先确认 `$DOCKER_IP` 和 `$PVE_IP` 在当前会话里（`export` 只在当前会话有效，换控制台后要重新导出）：
 
 ```bash
-echo "$DOCKER_IP"
+echo "$DOCKER_IP $PVE_IP"
 ```
 
 **容器控制台**：
@@ -358,7 +373,8 @@ table inet filter {
     type filter hook input priority 0; policy drop;
     ct state established,related accept
     iif lo accept
-    ip saddr $DOCKER_IP tcp dport 4096 accept
+    ip saddr { $DOCKER_IP, $PVE_IP } tcp dport 4096 accept
+    ip saddr { $DOCKER_IP, $PVE_IP } icmp type echo-request accept
   }
   chain forward {
     type filter hook forward priority 0; policy drop;
@@ -369,7 +385,9 @@ table inet filter {
 }
 EOF
 
-systemctl enable --now nftables
+nft -c -f /etc/nftables.conf    # 先检查语法
+systemctl enable nftables
+systemctl restart nftables
 nft list ruleset
 ```
 
@@ -377,16 +395,11 @@ nft list ruleset
 
 ### 5.1 关于转模板时是否保留 nftables
 
-`add-user.sh` 的健康检查和冒烟测试都从 **PVE 宿主**发起，而上面规则只放行 `$DOCKER_IP`。所以默认在 §8 转模板前**禁用** nftables，克隆出来的用户 LXC 不会带端口限制。
+上面的规则同时放行 `$DOCKER_IP`（bridge 容器）和 `$PVE_IP`（`add-user.sh` 与冒烟测试的发起方），所以**转模板时保留 nftables 启用**，克隆出来的用户 LXC 会自动带上端口限制。
 
-如果你希望克隆后仍限制来源，改成同时放行 docker LXC 和 PVE 宿主，并在 §8 保留 `nftables` 启用：
-
-```bash
-# 把 input 链里的放行行替换为：
-ip saddr { $DOCKER_IP, <PVE_IP> } tcp dport 4096 accept
-```
-
-改完重新 `systemctl restart nftables`，并确认 `add-user.sh` 的健康检查能通过。
+> 早期版本默认在转模板前禁用 nftables，原因是健康检查从 PVE 宿主发起、当时只放行了 docker LXC。现在把 PVE 宿主也加进放行列表，就不需要禁用了。
+>
+> 如果你确实不想在用户 LXC 里保留端口限制，可以在 §8 额外执行 `systemctl disable nftables`，但这样 4096 会对整个局域网开放（仍有 basic auth 兜底）。
 
 ---
 
@@ -406,10 +419,11 @@ systemctl status opencode-serve --no-pager
 curl -fsS http://127.0.0.1:4096/global/health
 ```
 
-确认服务进程真的拿到了代理变量：
+确认服务进程真的拿到了代理变量（`EnvironmentFile` 加载的变量不会出现在 `systemctl show -p Environment` 里，要读进程环境）：
 
 ```bash
-systemctl show opencode-serve -p Environment | tr ' ' '\n' | grep -i proxy
+PID=$(systemctl show -p MainPID --value opencode-serve)
+tr '\0' '\n' < "/proc/$PID/environ" | grep -i proxy
 curl -fsS -o /dev/null -w '%{http_code}\n' https://api.github.com   # 期望 200
 ```
 
@@ -458,12 +472,17 @@ cd /root/feishu-bridge
 **容器控制台**：
 
 ```bash
-systemctl disable opencode-serve
-systemctl disable nftables        # 见 §5.1；保留端口限制的话跳过这行
-rm -f /etc/opencode/serve.env     # 删掉模板期临时密码
-rm -rf /root/feishu-bridge        # 仓库只在安装期用
-touch /etc/opencode/ready         # add-user.sh 等待的就绪标记
+systemctl disable --now opencode-serve   # 模板不启动服务
+rm -f /etc/opencode/serve.env            # 删掉模板期临时密码
+rm -rf /root/feishu-bridge               # 仓库只在安装期用
+rm -rf /root/.opencode                   # 安装器目录（已拷到 /usr/local/bin）
+rm -rf /root/.config/opencode /root/.cache/opencode \
+       /root/.local/share/opencode /root/.local/state/opencode
+rm -f /root/.bash_history /tmp/opencode-smoke.bin
+touch /etc/opencode/ready                # add-user.sh 等待的就绪标记
 ```
+
+> `nftables` 保持启用（见 §5.1），克隆出来的用户 LXC 会继承端口限制。
 
 > 可选：`passwd -l root` 锁定 root 密码。用户 LXC 不装 SSH，登录入口只有 PVE 控制台 / `pct enter`，锁定不影响 opencode 以 root 运行。
 
@@ -497,7 +516,10 @@ pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
 - [ ] `pct start 900` 报错（模板不能启动）
 - [ ] 克隆测试：`pct clone 900 999 --full && pct start 999`
 - [ ] 克隆内 `/etc/opencode/ready` 存在
-- [ ] 克隆内 `systemctl show opencode-serve -p Environment` 能看到代理变量
+- [ ] 克隆内 `/etc/default/locale` 为 `LANG=C.UTF-8`
+- [ ] 克隆内 `systemctl is-enabled nftables` 为 `enabled`
+- [ ] 克隆内 `nft list ruleset` 能看到放行 `$DOCKER_IP` 和 `$PVE_IP` 的 4096 规则
+- [ ] 克隆内 `PID=$(systemctl show -p MainPID --value opencode-serve); tr '\0' '\n' < /proc/$PID/environ | grep -i proxy` 有输出
 - [ ] 克隆内 `bash -lc 'curl -s -o /dev/null -w "%{http_code}" https://api.github.com'` 返回 200
 - [ ] 克隆内 `/workspace/AGENTS.md` 含「网络与代理」一节
 - [ ] 克隆内 `/root/feishu-bridge` 已不存在
@@ -511,11 +533,13 @@ pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `apt update` 卡住/超时 | 代理没配或地址错 | 容器内 `cat /etc/apt/apt.conf.d/99proxy`；`curl -v https://deb.debian.org` |
+| 控制台里中文乱码 | `LANG=C`，`en_US.UTF-8` 没生成 | 按 §2.2 设 `LANG=C.UTF-8`；文件本身是否损坏用 `python3 -c "open('/workspace/AGENTS.md','rb').read().decode()"` 验证 |
 | `curl` 外网超时 | 当前会话没加载代理 | `set -a; . /etc/opencode/proxy.env; set +a` |
 | opencode 下载失败 | 代理不通 | 先 `curl -I https://opencode.ai` 确认 200 |
 | `opencode serve` 启动即退出 | 缺依赖 | `journalctl -u opencode-serve -n 50 --no-pager` |
 | `fs/write` 返回 404 | 版本不对或接口路径变了 | 确认 `opencode --version` 是 v2 系列；对照 `app/opencode.py` 的接口路径 |
-| 4096 从别的机器连不上 | nftables 只放行 `$DOCKER_IP` | 正常；需要时按 §5.1 放行 |
+| `fs/read` 返回 404 | 缺少 `location[directory]` 参数 | 读文件必须带 `?location%5Bdirectory%5D=/tmp`（见 `scripts/smoke-test.sh`） |
+| 4096 从别的机器连不上 | nftables 只放行 `$DOCKER_IP` 和 `$PVE_IP` | 正常；需要时按 §5.1 追加来源 |
 | 从 PVE 宿主 curl 4096 超时 | 同上 | 正常；健康检查请在容器内打 `127.0.0.1` |
 | nftables 启动失败 | 非特权 LXC 限制 | 退化为 iptables，或暂时不启用 |
 | 克隆后 opencode 起不来 | 模板没 `disable` 或没写 `ready` | 检查 §8.1 |
