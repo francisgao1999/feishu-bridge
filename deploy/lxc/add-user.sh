@@ -9,15 +9,15 @@ set -euo pipefail
 TEMPLATE=900
 START_ID=901
 MAX_ID=9999
-DOCKER_LXC=100
-GATEWAY=10.0.0.1
+DOCKER_LXC=101
+GATEWAY=192.168.110.254
 BRIDGE=vmbr0
 MEMORY=2048
 SWAP=1024
 CORES=4
 DISK=24G
 PREFIX=24
-CONFIG_PATH=/opt/feishu-bridge/config/users.json
+CONFIG_PATH=/root/container/feishu-bridge/config/users.json
 SKIP_SMOKE=0
 DRY_RUN=0
 
@@ -38,8 +38,8 @@ usage() {
 选项：
   --template <id>       模板 LXC ID（默认 900）
   --start-id <id>       用户 LXC 起始 VMID（默认 901，从该 ID 向上找第一个空闲号）
-  --docker-lxc <id>     运行 bridge 的 docker LXC ID（默认 100）
-  --gateway <ip>        网关（默认 10.0.0.1）
+  --docker-lxc <id>     运行 bridge 的 docker LXC ID（默认 101）
+  --gateway <ip>        网关（默认 192.168.110.254）
   --bridge <name>       PVE 网桥（默认 vmbr0）
   --prefix <bits>       IP 前缀长度（默认 24）
   --memory <MB>         内存（默认 2048）
@@ -47,14 +47,14 @@ usage() {
   --cores <n>           CPU 核心数（默认 4）
   --disk <size>         磁盘大小（默认 24G，模板盘 8G，克隆后扩容）
   --config-path <path>  docker LXC 内 users.json 路径
-                        （默认 /opt/feishu-bridge/config/users.json）
+                        （默认 /root/container/feishu-bridge/config/users.json）
   --skip-smoke          不执行冒烟测试
   --dry-run             只打印将执行的命令，不实际创建
   -h, --help            显示本帮助
 
 示例：
-  ./deploy/lxc/add-user.sh alice ou_abc123 10.0.0.11
-  ./deploy/lxc/add-user.sh bob ou_def456 10.0.0.12 --memory 3072 --cores 6
+  ./deploy/lxc/add-user.sh alice ou_abc123 192.168.110.201
+  ./deploy/lxc/add-user.sh bob ou_def456 192.168.110.202 --memory 3072 --cores 6
 
 失败处理：
   脚本会在创建前打印 VMID；任一步失败时按提示手工清理：

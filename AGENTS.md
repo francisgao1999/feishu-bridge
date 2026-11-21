@@ -192,20 +192,21 @@ docker build --network host \
 
 | 项目 | 值 |
 | --- | --- |
-| 安装目录 | `/opt/feishu-bridge`（docker LXC 内） |
+| 安装目录 | `/root/container/feishu-bridge`（docker LXC 101 内） |
 | bridge 容器 | `feishu-bridge`（`docker compose`） |
-| 用户映射 | `/opt/feishu-bridge/config/users.json`（仅服务器本地） |
-| 配置/密钥 | `/opt/feishu-bridge/bridge.env`（仅服务器本地） |
-| 数据库 | `/opt/feishu-bridge/data/bridge.db` |
+| compose 文件 | `/root/container/feishu-bridge/compose.yaml`（部署时使用；仓库内为 `docker-compose.yml`） |
+| 用户映射 | `/root/container/feishu-bridge/config/users.json`（仅服务器本地） |
+| 配置/密钥 | `/root/container/feishu-bridge/bridge.env`（仅服务器本地） |
+| 数据库 | `/root/container/feishu-bridge/data/bridge.db` |
 | 日志 | `docker compose logs -f bridge` |
-| 备份 | `cd /opt/feishu-bridge && ./backup.sh`，输出到 `backups/` |
+| 备份 | 仓库根目录 `backup.sh`；复制到 `/root/container/feishu-bridge/` 后执行 `./backup.sh`，输出到 `backups/` |
 | 模板 LXC | VMID 900，`oc-template` |
-| 用户 LXC | 从 101 开始，按 `oc-<slug>` 命名 |
+| 用户 LXC | 从 901 开始，按 `oc-<slug>` 命名 |
 
 用户部署时的常用命令（由用户执行）：
 
 ```bash
-cd /opt/feishu-bridge
+cd /root/container/feishu-bridge
 git pull --ff-only
 docker compose build
 docker compose up -d
@@ -217,8 +218,8 @@ docker compose logs -f bridge
 
 ```bash
 pct list
-pct status 101
-pct enter 101
+pct status 901
+pct enter 901
 journalctl -u opencode-serve -n 50 --no-pager   # 在 LXC 内
 ```
 
@@ -238,7 +239,7 @@ git push origin main
 用户紧急回滚时可在服务器临时切到上一个可用提交：
 
 ```bash
-cd /opt/feishu-bridge
+cd /root/container/feishu-bridge
 git log --oneline -10
 git checkout <good-commit>
 docker compose up -d --build

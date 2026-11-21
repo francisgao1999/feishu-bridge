@@ -5,8 +5,8 @@
 # 用法见 docs/lxc-scripts.md。
 set -euo pipefail
 
-DOCKER_LXC=100
-CONFIG_PATH=/opt/feishu-bridge/config/users.json
+DOCKER_LXC=101
+CONFIG_PATH=/root/container/feishu-bridge/config/users.json
 BACKUP_DIR=/var/lib/vz/dump
 KEEP_LXC=0
 DRY_RUN=0
@@ -22,9 +22,9 @@ usage() {
 
 选项：
   --vmid <id>           直接指定 LXC ID（与 slug 二选一）
-  --docker-lxc <id>     运行 bridge 的 docker LXC ID（默认 100）
+  --docker-lxc <id>     运行 bridge 的 docker LXC ID（默认 101）
   --config-path <path>  docker LXC 内 users.json 路径
-                        （默认 /opt/feishu-bridge/config/users.json）
+                        （默认 /root/container/feishu-bridge/config/users.json）
   --backup-dir <path>   vzdump 输出目录（默认 /var/lib/vz/dump）
   --keep-lxc            只从 users.json 移除，不停止/删除 LXC
   --dry-run             只打印将执行的操作

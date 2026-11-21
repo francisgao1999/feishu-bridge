@@ -12,9 +12,9 @@
    ▼
 docker LXC（bridge 容器）
    │  users.json 按 open_id 路由
-   ├──► 用户 LXC 101  http://10.0.0.11:4096  /workspace
-   ├──► 用户 LXC 102  http://10.0.0.12:4096  /workspace
-   └──► 用户 LXC 103  http://10.0.0.13:4096  /workspace
+   ├──► 用户 LXC 901  http://192.168.110.201:4096  /workspace
+   ├──► 用户 LXC 902  http://192.168.110.202:4096  /workspace
+   └──► 用户 LXC 903  http://192.168.110.203:4096  /workspace
 ```
 
 - **每个用户一个 PVE LXC**（非特权容器，宿主映射 100000），内含 `/workspace` 和 `opencode serve --hostname 0.0.0.0 --port 4096`。
@@ -81,7 +81,7 @@ docker LXC（bridge 容器）
 ### 1. 前置条件
 
 - PVE 宿主机（能创建 LXC，有 `pct`）
-- 一个运行 Docker 的 LXC（下文称 docker LXC，VMID 100，IP `10.0.0.10`）
+- 一个运行 Docker 的 LXC（下文称 docker LXC，VMID 101，IP `192.168.110.11`）
 - 每个用户一个固定 IP（由管理员显式分配）
 - 飞书自建应用（一个机器人服务所有人）
 - 一台能访问用户 LXC 4096 端口的机器用来跑冒烟测试
@@ -108,7 +108,7 @@ docker LXC（bridge 容器）
 
 模板的 opencode 配置内置 5 个 MCP 服务器：`playwright`、`ast_grep`、`context7`、`exa`、`grep_app`。其中 `context7`/`exa` 的密钥从 `/etc/opencode/service.env` 读取，不要写进 `opencode.jsonc`。
 
-nftables 规则（仅放行 docker LXC 访问 4096）已写好，但 `add-user.sh` 的健康检查和冒烟测试从 PVE 宿主发起，所以**转模板时默认禁用**；需要保留端口限制时按教程 §5.1 放行 PVE 宿主再启用。
+nftables 规则（仅放行 docker LXC 和 PVE 宿主访问 4096）已写好，`add-user.sh` 的健康检查和冒烟测试从 PVE 宿主发起，所以**转模板时保持启用**；确实不想保留端口限制时，按教程 §5.1 处理。
 
 工作区 `/workspace/AGENTS.md` 也包含「网络与代理」和「MCP 工具」两节，告诉 opencode 出站走代理、各工具如何显式指定、哪些配置不要改，以及模板内置了哪些 MCP。
 
@@ -119,7 +119,7 @@ nftables 规则（仅放行 docker LXC 访问 4096）已写好，但 `add-user.s
 在 docker LXC 内：
 
 ```bash
-cd /opt/feishu-bridge
+cd /root/container/feishu-bridge
 git clone https://github.com/francisgao1999/feishu-bridge.git .
 cp bridge.env.example bridge.env
 chmod 600 bridge.env
@@ -146,10 +146,10 @@ docker compose logs -f
 
 ```bash
 cd /path/to/feishu-bridge
-./deploy/lxc/add-user.sh alice ou_xxxxxxxx 10.0.0.11
+./deploy/lxc/add-user.sh alice ou_xxxxxxxx 192.168.110.201
 ```
 
-脚本会克隆模板、设置 IP、生成密码、启动 opencode、写入 `users.json`、跑冒烟。用户 LXC 默认从 VMID `901` 开始编号，避免和基础设施 LXC（`100`/`101`/`102`）混在一起；可用 `--start-id` 调整起始号。`users.json` 通过目录挂载热加载，**不需要重启 bridge**。
+脚本会克隆模板、设置 IP、生成密码、启动 opencode、写入 `users.json`、跑冒烟。用户 LXC 默认从 VMID `901` 开始编号，避免和基础设施 LXC（`101`/`102`）混在一起；可用 `--start-id` 调整起始号。`users.json` 通过目录挂载热加载，**不需要重启 bridge**。
 
 完整参数与排错见 [`docs/lxc-scripts.md`](docs/lxc-scripts.md)。
 
@@ -400,7 +400,7 @@ OpenCode 的 `question` 工具会创建 form，等待用户输入。bridge 把�
   {
     "open_id": "ou_xxxxxxxxxxxxxxxx",
     "slug": "alice",
-    "url": "http://10.0.0.11:4096",
+    "url": "http://192.168.110.201:4096",
     "password": "随机密码",
     "workspace": "/workspace"
   }
@@ -434,7 +434,7 @@ git diff --check
 `backup.sh` 打包 SQLite 一致性快照、`bridge.env`、`config/users.json` 和 `app/` 源码，输出到 `backups/bridge-<时间戳>.tar.gz`（600），保留 7 天。
 
 ```bash
-cd /opt/feishu-bridge
+cd /root/container/feishu-bridge
 ./backup.sh
 ```
 

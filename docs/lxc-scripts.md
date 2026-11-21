@@ -23,8 +23,8 @@ cd /root/feishu-opencode-bridge          # 仓库目录（在 PVE 宿主上）
 示例：
 
 ```bash
-./deploy/lxc/add-user.sh alice ou_2f1c... 10.0.0.11
-./deploy/lxc/add-user.sh bob   ou_8a3d... 10.0.0.12 --memory 3072 --cores 4
+./deploy/lxc/add-user.sh alice ou_2f1c... 192.168.110.201
+./deploy/lxc/add-user.sh bob   ou_8a3d... 192.168.110.202 --memory 3072 --cores 4
 ```
 
 ### 1.2 参数
@@ -36,20 +36,20 @@ cd /root/feishu-opencode-bridge          # 仓库目录（在 PVE 宿主上）
 | `ip` | 是 | — | 固定 IP，脚本只校验格式与是否被占用 |
 | `--template <id>` | 否 | `900` | 模板 LXC ID |
 | `--start-id <id>` | 否 | `901` | 用户 LXC 起始 VMID，从该号向上找第一个空闲号 |
-| `--docker-lxc <id>` | 否 | `100` | 运行 bridge 的 docker LXC ID |
-| `--gateway <ip>` | 否 | `10.0.0.1` | 网关 |
+| `--docker-lxc <id>` | 否 | `101` | 运行 bridge 的 docker LXC ID |
+| `--gateway <ip>` | 否 | `192.168.110.254` | 网关 |
 | `--bridge <name>` | 否 | `vmbr0` | PVE 网桥 |
 | `--prefix <bits>` | 否 | `24` | IP 前缀长度，按实际网段填写 |
 | `--memory <MB>` | 否 | `2048` | 内存 |
 | `--swap <MB>` | 否 | `1024` | swap |
 | `--cores <n>` | 否 | `4` | CPU 核心 |
 | `--disk <size>` | 否 | `24G` | 磁盘（先克隆 8G 模板盘再扩容） |
-| `--config-path <path>` | 否 | `/opt/feishu-bridge/config/users.json` | docker LXC 内 `users.json` 路径 |
+| `--config-path <path>` | 否 | `/root/container/feishu-bridge/config/users.json` | docker LXC 内 `users.json` 路径 |
 | `--skip-smoke` | 否 | 关 | 跳过冒烟测试（不推荐） |
 | `--dry-run` | 否 | 关 | 只打印命令，不实际执行 |
 | `-h, --help` | 否 | — | 显示帮助 |
 
-> 用户 LXC 默认从 `901` 开始编号，避免和基础设施 LXC（100/101/102）混在一起；`--start-id` 可改起始号。起始号被占用时会自动向上找第一个空闲号。
+> 用户 LXC 默认从 `901` 开始编号，避免和基础设施 LXC（101/102）混在一起；`--start-id` 可改起始号。起始号被占用时会自动向上找第一个空闲号。
 
 ### 1.3 执行步骤
 
@@ -131,8 +131,8 @@ pct exec <vmid> -- bash -lc 'curl -fsS -o /dev/null -w "%{http_code}\n" https://
 | --- | --- | --- | --- |
 | `slug` | 二选一 | — | 按主机名 `oc-<slug>` 查找 VMID |
 | `--vmid <id>` | 二选一 | — | 直接指定 VMID |
-| `--docker-lxc <id>` | 否 | `100` | docker LXC ID |
-| `--config-path <path>` | 否 | `/opt/feishu-bridge/config/users.json` | `users.json` 路径 |
+| `--docker-lxc <id>` | 否 | `101` | docker LXC ID |
+| `--config-path <path>` | 否 | `/root/container/feishu-bridge/config/users.json` | `users.json` 路径 |
 | `--backup-dir <path>` | 否 | `/var/lib/vz/dump` | `vzdump` 输出目录 |
 | `--keep-lxc` | 否 | 关 | 只移除映射，不停止/删除 LXC |
 | `--dry-run` | 否 | 关 | 只打印操作 |
@@ -162,7 +162,7 @@ pct stop 105
 
 ### 3.1 位置
 
-- 宿主机（docker LXC 内）：`/opt/feishu-bridge/config/users.json`
+- 宿主机（docker LXC 内）：`/root/container/feishu-bridge/config/users.json`
 - bridge 容器内：`/app/config/users.json`（只读挂载）
 
 **必须挂目录**（`./config:/app/config:ro`），不能挂单文件。原因：`pct push` 会替换 inode，单文件 bind mount 会继续指向旧文件，热加载失效。
@@ -174,7 +174,7 @@ pct stop 105
   {
     "open_id": "ou_xxx",
     "slug": "alice",
-    "url": "http://10.0.0.11:4096",
+    "url": "http://192.168.110.201:4096",
     "password": "随机密码",
     "workspace": "/workspace"
   }
@@ -187,7 +187,7 @@ pct stop 105
 
 ```bash
 # 在 docker LXC 内
-cd /opt/feishu-bridge
+cd /root/container/feishu-bridge
 cp config/users.json config/users.json.bak
 vi config/users.json
 # 校验 JSON
@@ -211,12 +211,12 @@ bridge 每 5 秒检查 mtime，改动后自动生效，无需重启。
 2. 在 PVE 宿主改 LXC 网络：
 
 ```bash
-pct set 105 --net0 "name=eth0,bridge=vmbr0,ip=10.0.0.20/24,gw=10.0.0.1"
+pct set 105 --net0 "name=eth0,bridge=vmbr0,ip=192.168.110.205/24,gw=192.168.110.254"
 pct reboot 105
 ```
 
 3. 更新 `users.json` 的 `url`，等 5 秒热加载
-4. 跑 `scripts/smoke-test.sh --url http://10.0.0.20:4096 --password <pw>`
+4. 跑 `scripts/smoke-test.sh --url http://192.168.110.205:4096 --password <pw>`
 
 ---
 
@@ -235,10 +235,10 @@ pct reboot 105
 
 ```bash
 # 单个用户
-./scripts/smoke-test.sh --url http://10.0.0.11:4096 --password <pw>
+./scripts/smoke-test.sh --url http://192.168.110.201:4096 --password <pw>
 
 # 全部用户
-./scripts/smoke-test.sh --users /opt/feishu-bridge/config/users.json
+./scripts/smoke-test.sh --users /root/container/feishu-bridge/config/users.json
 ```
 
 退出码 `0` 表示全部通过；非 `0` 表示有失败项，按输出逐项排查。
