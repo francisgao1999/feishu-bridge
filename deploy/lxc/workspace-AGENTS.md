@@ -75,6 +75,7 @@ apt-get install -y postgresql
 - `HTTP_PROXY` / `HTTPS_PROXY`：`http://192.168.110.11:10808`
 - `ALL_PROXY`：`socks5h://192.168.110.11:10808`
 - `NO_PROXY`：`localhost`、`127.0.0.1` 和私有网段，内网直连
+- 访问用户的客户生产环境时，可用本机 SOCKS5 代理 `127.0.0.1:40808`；需要用户先在 meshloom 中手动建立连接。
 
 opencode 服务启动时已注入这些变量，它执行的命令会自动继承，`curl`、`git`、`pip`、`npm` 一般不需要额外参数。
 

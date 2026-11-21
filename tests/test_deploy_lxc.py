@@ -81,6 +81,11 @@ class ProxyConfigTest(unittest.TestCase):
         self.assertIn("HTTP_PROXY", text)
         self.assertIn("proxy.env", text)
 
+    def test_workspace_agents_mentions_customer_proxy(self):
+        text = (LXC_DIR / "workspace-AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("127.0.0.1:40808", text)
+        self.assertIn("meshloom", text)
+
     def test_add_user_verifies_proxy(self):
         text = (LXC_DIR / "add-user.sh").read_text(encoding="utf-8")
         self.assertIn("/etc/opencode/proxy.env", text)
