@@ -210,7 +210,7 @@ EOF
 
 后面要用的 `opencode-serve.service`、`opencode.jsonc`、`workspace-AGENTS.md`、`scripts/smoke-test.sh` 都在仓库里。
 
-**容器控制台**（走代理克隆）：
+**容器控制台**（走代理克隆；仓库是私有的就用带 token 的地址）：
 
 ```bash
 git clone --depth 1 https://github.com/francisgao1999/feishu-bridge.git /root/feishu-bridge
@@ -218,32 +218,53 @@ cd /root/feishu-bridge
 ls deploy/lxc scripts
 ```
 
-克隆失败（仓库私有、网络不通）时，改用**宿主 Shell** 推送：把仓库放到 PVE 宿主上，然后
+克隆不通时，改用**宿主 Shell** 推送。先在开发机把需要的文件传到 PVE 宿主：
 
 ```bash
-pct push 900 /path/to/feishu-bridge/deploy/lxc/opencode-serve.service /tmp/opencode-serve.service
-pct push 900 /path/to/feishu-bridge/deploy/lxc/opencode.jsonc /tmp/opencode.jsonc
-pct push 900 /path/to/feishu-bridge/deploy/lxc/workspace-AGENTS.md /tmp/workspace-AGENTS.md
-pct push 900 /path/to/feishu-bridge/scripts/smoke-test.sh /tmp/smoke-test.sh
+# 开发机（WSL）
+scp -r deploy/lxc scripts pve_hzdd:/root/feishu-bridge-files/
 ```
 
-> 仓库只在安装期用，转模板前会删掉（§8），不会留在用户 LXC 里。
+再在 **PVE 宿主 Shell** 里推到容器：
+
+```bash
+pct push 900 /root/feishu-bridge-files/deploy/lxc/opencode-serve.service /tmp/opencode-serve.service
+pct push 900 /root/feishu-bridge-files/deploy/lxc/opencode.jsonc /tmp/opencode.jsonc
+pct push 900 /root/feishu-bridge-files/deploy/lxc/workspace-AGENTS.md /tmp/workspace-AGENTS.md
+pct push 900 /root/feishu-bridge-files/scripts/smoke-test.sh /tmp/smoke-test.sh
+```
+
+然后回到**容器控制台**，把 `/tmp` 下的文件归位：
+
+```bash
+mkdir -p /root/feishu-bridge/deploy/lxc /root/feishu-bridge/scripts
+mv /tmp/opencode-serve.service /tmp/opencode.jsonc /tmp/workspace-AGENTS.md /root/feishu-bridge/deploy/lxc/
+mv /tmp/smoke-test.sh /root/feishu-bridge/scripts/
+chmod +x /root/feishu-bridge/scripts/smoke-test.sh
+```
+
+> 仓库文件只在安装期用，转模板前会删掉（§8），不会留在用户 LXC 里。
 
 ---
 
 ## 3. 安装 opencode
 
-固定版本 2.3.2，`fs/write` 是 experimental 接口，升级前必须先跑冒烟测试。
+不固定版本，装官方安装脚本给的最新 v2 版本。
 
 **容器控制台**：
 
 ```bash
-curl -fsSL https://opencode.ai/install | bash -s -- --version 2.3.2
+curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path
 install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode
-opencode --version        # 期望 2.3.2
+rm -rf /root/.opencode          # 安装器目录只留一份，模板里不必带
+opencode --version              # 记下实际版本号
 ```
 
+> `--no-modify-path` 让安装器不改 `.bashrc`；`systemd` 单元固定用 `/usr/local/bin/opencode`，所以这里把二进制拷过去，模板里不再保留 `/root/.opencode` 副本。
+
 > 下载走代理，当前会话的 `$HTTPS_PROXY` 已在 §1.4 加载。
+
+`fs/write` 是 experimental 接口，不同版本可能调整路径或行为。**装完必须跑 §7 的冒烟测试**，不通过就不要转模板。把 `opencode --version` 的输出记到部署记录里，方便出问题时对照。
 
 ---
 
@@ -404,7 +425,7 @@ curl -fsS -u opencode:template-temp http://127.0.0.1:4096/global/health
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4096/api/model   # 期望 401
 ```
 
-> 同时写 `OPENCODE_PASSWORD` 和 `OPENCODE_SERVER_PASSWORD`：2.3.2 读前者，新版本读后者。
+> 同时写 `OPENCODE_PASSWORD` 和 `OPENCODE_SERVER_PASSWORD`：早期 v2 版本读前者，新版本读后者，两个都写最稳。
 > 这个临时密码会被克隆到用户 LXC，`add-user.sh` 会立即覆盖成随机密码，所以模板里用什么值都行。
 
 ---
@@ -493,7 +514,7 @@ pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
 | `curl` 外网超时 | 当前会话没加载代理 | `set -a; . /etc/opencode/proxy.env; set +a` |
 | opencode 下载失败 | 代理不通 | 先 `curl -I https://opencode.ai` 确认 200 |
 | `opencode serve` 启动即退出 | 缺依赖 | `journalctl -u opencode-serve -n 50 --no-pager` |
-| `fs/write` 返回 404 | 版本不对 | 确认 `opencode --version` 是 2.3.2 |
+| `fs/write` 返回 404 | 版本不对或接口路径变了 | 确认 `opencode --version` 是 v2 系列；对照 `app/opencode.py` 的接口路径 |
 | 4096 从别的机器连不上 | nftables 只放行 `$DOCKER_IP` | 正常；需要时按 §5.1 放行 |
 | 从 PVE 宿主 curl 4096 超时 | 同上 | 正常；健康检查请在容器内打 `127.0.0.1` |
 | nftables 启动失败 | 非特权 LXC 限制 | 退化为 iptables，或暂时不启用 |

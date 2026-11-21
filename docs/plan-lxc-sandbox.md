@@ -677,7 +677,7 @@ volumes:
 
 1. `pct create 900 <debian-13-template> --hostname oc-template ...`
 2. `apt update && apt install -y <默认软件包清单>`
-3. 安装 opencode 2.3.2（官方安装脚本，固定版本）
+3. 安装 opencode v2（官方安装脚本，不固定小版本）
 4. 创建 `/workspace`、`/workspace/outbox`、`/etc/opencode/`
 5. 写入 `opencode-serve.service`、`opencode.jsonc`、`workspace-AGENTS.md`
 6. 配置 nftables（仅放行 docker LXC 访问 4096）
@@ -763,7 +763,7 @@ docker compose logs -f
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| `fs/write` 是 experimental 接口 | 升级后文件投递失效 | 版本固定 2.3.2；投递封装在单方法；升级必须先跑冒烟 |
+| `fs/write` 是 experimental 接口 | 升级后文件投递失效 | 不固定小版本；投递封装在单方法；升级必须先跑冒烟 |
 | 飞书 100 MB 限制 | 超大 SQL 无法上传 | 明确提示拆分/压缩；文档写明 |
 | 非特权 LXC 共享内核 | 隔离弱于 VM | 可信用户模型；`pct rollback`；必要时迁移单个用户到 VM |
 | LXC 网络暴露 4096 | 同网段可访问 | nftables 仅放行 docker LXC IP；basic auth |
