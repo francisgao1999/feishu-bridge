@@ -36,6 +36,8 @@ python3 chart.py /workspace/outbox/chart.png
 playwright screenshot --viewport-size=1280,800 https://example.com /workspace/outbox/shot.png
 ```
 
+Chromium 已预装在 `/root/.cache/ms-playwright`，**不要重复执行 `playwright install`**。如果 MCP 或命令行提示浏览器未安装，先检查 `echo $PLAYWRIGHT_BROWSERS_PATH` 是否指向 `/root/.cache/ms-playwright`；路径不对时找管理员，不要直接重新下载（会多占约 700MB）。
+
 不要重复写同名文件——桥接器按内容 sha256 去重，内容相同只发一次。
 
 ## MCP 工具

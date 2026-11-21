@@ -290,11 +290,12 @@ npm config set https-proxy "$HTTP_PROXY" --location=global
 PW_VERSION=$(npm view @playwright/mcp@latest dependencies.playwright)
 npm install -g @playwright/mcp@latest "playwright@$PW_VERSION"
 apt-get update
-playwright install --with-deps chromium
+PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright playwright install --with-deps chromium
 ```
 
 - `npm install -g` 把 `playwright-mcp` 和 `playwright` 两个命令装到 `/usr/local/bin`，`opencode.jsonc` 里的 MCP 直接调用全局命令，不走 `npx` 下载。
 - 必须装同版本的 `playwright`：`@playwright/mcp` 依赖的版本可能不是稳定版，版本不一致会导致 MCP 找不到已下载的 Chromium。
+- **必须显式指定 `PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright`**：`opencode-serve.service` 里设置了 `XDG_CACHE_HOME=/var/cache/opencode`，Playwright 默认会去 `$XDG_CACHE_HOME/ms-playwright` 找浏览器；不指定就会误判“未安装”，agent 会再下载一份约 700MB 到 `/var/cache/opencode/ms-playwright`。`service.env.example` 已写入该变量，克隆后 MCP 和 bash 工具都会继承。
 - `playwright install --with-deps chromium` 下载 Chromium 到 `/root/.cache/ms-playwright`，并安装运行所需的系统库。下载走代理，命令可能跑几分钟。
 - 容器内以 root 运行，`opencode.jsonc` 已给 MCP 加 `--no-sandbox`；无显示器，已加 `--headless`。
 
@@ -639,7 +640,8 @@ pct config 900 | grep -E 'template|rootfs|memory|swap|cores|features'
 | 克隆后 opencode 起不来 | 模板没 `disable` 或没写 `ready` | 检查 §8.1 |
 | 克隆后外网不通 | 模板缺 `/etc/opencode/proxy.env` | 按 §1.4 重建模板 |
 | agent 截图时仍 `apt install nodejs` | 模板没装 Node.js，或用户 LXC 是旧模板克隆的 | 按 §2.3 装；旧用户 LXC 需逐台补装或重建 |
-| Playwright MCP 启动失败 | 缺系统库或 Chromium 没下载 | `playwright install --with-deps chromium`；`journalctl -u opencode-serve -n 50 --no-pager` |
+| Playwright MCP 启动失败 | 缺系统库或 Chromium 没下载 | `PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright playwright install --with-deps chromium`；`journalctl -u opencode-serve -n 50 --no-pager` |
+| 提示浏览器未安装 / 重复下载 700MB | `PLAYWRIGHT_BROWSERS_PATH` 没生效，落到了 `$XDG_CACHE_HOME/ms-playwright` | 确认 `/etc/opencode/service.env` 有 `PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright`，重启 `opencode-serve`；删掉重复的 `/var/cache/opencode/ms-playwright` |
 | Chromium 报 sandbox 错误 | 容器内以 root 运行 | `opencode.jsonc` 里已有 `--no-sandbox`，确认没被覆盖 |
 | 截图空白/超时 | 浏览器没走代理 | 检查 MCP 的 `--proxy-server` 是否是 `192.168.110.11:10808` |
 | `ast-grep-mcp` 启动失败 | Node 版本低于 22 | `node --version` 确认是 v22.x；按 §2.3 从 NodeSource 安装 |
