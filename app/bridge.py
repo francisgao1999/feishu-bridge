@@ -4090,12 +4090,21 @@ class Bridge:
         if state.timer is not None:
             state.timer.cancel()
 
+    def _commit_partial(self, state: _TaskProgress, marker: str = "💬") -> None:
+        """把尚未结束的流式片段落成一行日志，避免工具开始后残留在窗口里。"""
+        text = state.partial.strip()
+        state.partial = ""
+        state.partial_kind = ""
+        if text:
+            state.add_line(marker + " " + _short(text.replace("\n", " "), 200))
+
     async def _on_step_started(
         self, session_id: str, data: dict[str, Any]
     ) -> None:
         task, state = self._active_progress(session_id)
         if not task or not state:
             return
+        self._commit_partial(state)
         state.step += 1
         state.status = "执行中"
         state.phase = "模型思考中"
@@ -4156,6 +4165,7 @@ class Bridge:
         task, state = self._active_progress(session_id)
         if not task or not state:
             return
+        self._commit_partial(state)
         name = data.get("name") or "tool"
         state.tool = str(name)
         state.phase = f"准备调用 {name}"
@@ -4211,6 +4221,7 @@ class Bridge:
         shell_id = shell.get("id")
         if not shell_id:
             return
+        self._commit_partial(state)
         state.shell_id = str(shell_id)
         state.shell_dir = directory or shell.get("cwd") or state.shell_dir
         state.cursor = 0
@@ -4311,6 +4322,8 @@ class Bridge:
 
         label = f"{tool} {summary}".strip()
         state = self._progress_state(task["id"])
+        if phase == "called":
+            self._commit_partial(state)
         state.add_line(f"{marker} {label}")
         await self._update_progress(task, status=status, tool=label)
 
