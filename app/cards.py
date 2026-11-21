@@ -306,7 +306,7 @@ def sessions_card(
     elements.append(
         _note(
             "/switch 序号 切换 · /delete 序号 删除空闲会话 · "
-            "/clean 清理全部空闲会话 · /temp 创建临时会话"
+            "/clean 清理全部空闲会话"
         )
     )
     return {
@@ -622,7 +622,7 @@ def schedule_help_text() -> str:
     )
 
 
-def help_text(temp_ttl_text: str = "") -> str:
+def help_text() -> str:
     return (
         "可用命令\n"
         "\n"

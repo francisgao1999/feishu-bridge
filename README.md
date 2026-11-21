@@ -249,7 +249,7 @@ scripts/smoke-test.sh --users config/users.json
 
 ### 命令面板
 
-bridge 启动时会把顶层命令同步到飞书输入框 `/` 面板。需要应用开通 `application:app_slash_command:read/write`；同步失败只记日志，不影响机器人收发消息。
+bridge 启动时会把顶层命令同步到飞书输入框 `/` 面板：缺失的创建、描述变化的更新、已从命令目录移除的删除。需要应用开通 `application:app_slash_command:read/write`；同步失败只记日志，不影响机器人收发消息。
 
 ## 多会话并行
 

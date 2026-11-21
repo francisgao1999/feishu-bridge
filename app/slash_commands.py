@@ -104,6 +104,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
 class SyncResult:
     created: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
+    deleted: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     error: str | None = None
@@ -230,6 +231,24 @@ async def _update_command(
         )
 
 
+async def _delete_command(
+    client: httpx.AsyncClient,
+    base_url: str,
+    token: str,
+    command_id: str,
+) -> None:
+    response = await client.delete(
+        f"{base_url}{COMMANDS_PATH}/{command_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    data = _response_json(response)
+    if data.get("code") != 0:
+        raise SlashCommandError(
+            f"delete command {command_id} failed: "
+            f"{data.get('code')} {data.get('msg')}"
+        )
+
+
 def _is_permission_error(exc: Exception) -> bool:
     message = str(exc)
     return "99991672" in message or "99991640" in message
@@ -243,11 +262,11 @@ async def sync_slash_commands(
     client: httpx.AsyncClient | None = None,
     commands: tuple[SlashCommand, ...] = SLASH_COMMANDS,
 ) -> SyncResult:
-    """Create missing commands and update changed descriptions.
+    """Create missing commands, update changed descriptions, and delete
+    commands that are no longer in ``commands``.
 
     Best-effort: failures are logged and returned, never raised, so the
     bridge can start even when the app lacks the slash-command scope.
-    Commands that are not in ``commands`` are left untouched.
     """
     result = SyncResult()
     owns_client = client is None
@@ -297,11 +316,38 @@ async def sync_slash_commands(
                 )
                 result.failed.append(item.command)
 
+        wanted = {item.command for item in commands}
+        for name, current in existing.items():
+            if name in wanted:
+                continue
+            command_id = str(current.get("command_id") or "")
+            if not command_id:
+                log.warning("skip deleting /%s: missing command_id", name)
+                continue
+            try:
+                await _delete_command(client, base_url, token, command_id)
+                result.deleted.append(name)
+            except Exception as exc:
+                if _is_permission_error(exc):
+                    result.error = str(exc)
+                    log.warning(
+                        "sync slash commands stopped: %s "
+                        "(需要 application:app_slash_command:write "
+                        "权限并发布新版本)",
+                        exc,
+                    )
+                    break
+                log.warning(
+                    "delete slash command /%s failed: %s", name, exc
+                )
+                result.failed.append(name)
+
         log.info(
-            "slash commands synced: created=%s updated=%s "
+            "slash commands synced: created=%s updated=%s deleted=%s "
             "unchanged=%s failed=%s",
             len(result.created),
             len(result.updated),
+            len(result.deleted),
             len(result.unchanged),
             len(result.failed),
         )

@@ -53,12 +53,14 @@ class FakeFeishu:
         list_code: int = 0,
         create_code: int = 0,
         patch_code: int = 0,
+        delete_code: int = 0,
     ):
         self.items = list(items or [])
         self.token_code = token_code
         self.list_code = list_code
         self.create_code = create_code
         self.patch_code = patch_code
+        self.delete_code = delete_code
         self.requests: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -126,6 +128,22 @@ class FakeFeishu:
                 if item["command_id"] == command_id:
                     item["description"] = body["description"]
                     break
+            return httpx.Response(
+                200, json={"code": 0, "msg": "success", "data": {}}
+            )
+
+        if request.method == "DELETE":
+            command_id = request.url.path.rsplit("/", 1)[-1]
+            if self.delete_code != 0:
+                return httpx.Response(
+                    200,
+                    json={"code": self.delete_code, "msg": "delete failed"},
+                )
+            self.items = [
+                item
+                for item in self.items
+                if item["command_id"] != command_id
+            ]
             return httpx.Response(
                 200, json={"code": 0, "msg": "success", "data": {}}
             )
@@ -229,6 +247,52 @@ class SlashCommandSyncTest(unittest.IsolatedAsyncioTestCase):
                 and r.url.path.startswith(COMMANDS_PATH)
             ]
         )
+
+    async def test_deletes_commands_not_in_catalog(self):
+        items = existing_items()
+        items.append(
+            {
+                "command_id": "id-temp",
+                "command": "temp",
+                "description": {
+                    "default_value": "创建临时会话",
+                    "i18n": {
+                        "zh_cn": "创建临时会话",
+                        "en_us": "Create a temporary session",
+                    },
+                },
+            }
+        )
+        fake = FakeFeishu(items)
+        result = await self.sync(fake)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.deleted, ["temp"])
+        self.assertEqual(result.created, [])
+        self.assertEqual(result.updated, [])
+        self.assertEqual(set(result.unchanged), EXPECTED_COMMANDS)
+
+        deletes = [r for r in fake.requests if r.method == "DELETE"]
+        self.assertEqual(len(deletes), 1)
+        self.assertTrue(deletes[0].url.path.endswith("/id-temp"))
+        self.assertNotIn("temp", [item["command"] for item in fake.items])
+
+    async def test_delete_failure_is_reported(self):
+        items = existing_items()
+        items.append(
+            {
+                "command_id": "id-temp",
+                "command": "temp",
+                "description": {},
+            }
+        )
+        fake = FakeFeishu(items, delete_code=40000000)
+        result = await self.sync(fake)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.deleted, [])
+        self.assertEqual(result.failed, ["temp"])
+        self.assertIsNone(result.error)
 
     async def test_permission_error_is_returned(self):
         fake = FakeFeishu(list_code=99991672)
