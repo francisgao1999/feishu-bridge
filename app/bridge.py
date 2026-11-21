@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from cards import (
+    PROGRESS_LOG_LINES,
     agent_resolved_card,
     agent_select_card,
     approval_card,
@@ -609,6 +611,101 @@ def _assistant_text(message: dict[str, Any] | None) -> str:
     return "\n\n".join(parts)
 
 
+# 进度卡实时日志的内存上限：飞书卡片 JSON 有体积上限，超长日志会撞上限。
+_PROGRESS_LOG_MAX_LINES = 200
+_PROGRESS_LOG_MAX_BYTES = 12000
+_PROGRESS_PARTIAL_MAX_CHARS = 4000
+_PROGRESS_SHELL_CHUNK = 65536
+
+
+@dataclass
+class _TaskProgress:
+    """单个任务的实时进度状态，仅在内存中维护，不落库。"""
+
+    status: str = "执行中"
+    phase: str = ""
+    tool: str = ""
+    step: int = 0
+    lines: list[str] = field(default_factory=list)
+    used_bytes: int = 0
+    pending: str = ""
+    partial: str = ""
+    partial_kind: str = ""
+    shell_id: str | None = None
+    shell_dir: str | None = None
+    cursor: int = 0
+    truncated: bool = False
+    dirty: bool = False
+    closed: bool = False
+    collecting: bool = False
+    last_push: float = 0.0
+    timer: asyncio.Task[Any] | None = None
+
+    def add_line(self, text: str) -> None:
+        for line in text.splitlines() or [""]:
+            self.lines.append(line)
+            self.used_bytes += len(line.encode("utf-8")) + 1
+        self._trim()
+
+    def add_output(self, text: str) -> None:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        # shell 输出可能在一行中间被切块，先把不完整的尾行留在 pending。
+        text = self.pending + text
+        parts = text.split("\n")
+        self.pending = parts.pop()
+        for line in parts:
+            if not line.strip():
+                continue
+            rendered = "  " + line
+            self.lines.append(rendered)
+            self.used_bytes += len(rendered.encode("utf-8")) + 1
+        self._trim()
+
+    def flush_output(self) -> None:
+        if self.pending.strip():
+            rendered = "  " + self.pending
+            self.lines.append(rendered)
+            self.used_bytes += len(rendered.encode("utf-8")) + 1
+        self.pending = ""
+        self._trim()
+
+    def _trim(self) -> None:
+        while self.lines and (
+            len(self.lines) > _PROGRESS_LOG_MAX_LINES
+            or self.used_bytes + len(self.pending.encode("utf-8"))
+            > _PROGRESS_LOG_MAX_BYTES
+        ):
+            removed = self.lines.pop(0)
+            self.used_bytes -= len(removed.encode("utf-8")) + 1
+            self.truncated = True
+        if self.used_bytes < 0:
+            self.used_bytes = 0
+
+    def set_partial(self, text: str) -> None:
+        if len(text) > _PROGRESS_PARTIAL_MAX_CHARS:
+            text = "…" + text[-_PROGRESS_PARTIAL_MAX_CHARS:]
+        self.partial = text
+
+    def window(self, count: int = PROGRESS_LOG_LINES) -> list[str]:
+        lines = list(self.lines)
+        if self.pending.strip():
+            lines.append("  " + self.pending)
+        if self.partial:
+            lines.extend(self.partial.splitlines())
+        return lines[-count:]
+
+    def full_log(self) -> str:
+        lines = list(self.lines)
+        if self.pending.strip():
+            lines.append("  " + self.pending)
+        if self.partial:
+            lines.extend(self.partial.splitlines())
+        text = "\n".join(lines)
+        if self.truncated:
+            text = "…（更早的输出已省略）\n" + text
+        return text
+
+
 class Bridge:
     def __init__(
         self,
@@ -630,7 +727,7 @@ class Bridge:
         self._final_text: dict[str, str] = {}
         self._usage: dict[str, dict[str, Any]] = {}
         self._tool_names: dict[str, str] = {}
-        self._progress_last: dict[int, float] = {}
+        self._progress: dict[int, _TaskProgress] = {}
         self._started_at: dict[int, float] = {}
         self._stale_tasks: list[dict[str, Any]] = []
         self._model_catalog: list[dict[str, str]] = []
@@ -2227,15 +2324,13 @@ class Bridge:
             try:
                 await self.feishu.update_card_async(
                     active["card_message_id"],
-                    progress_card(
-                        status="已中止",
-                        prompt=active["prompt"],
-                        error="用户中止",
-                        session_id=session_id,
+                    self._final_progress_card(
+                        active, status="已中止", error="用户中止", with_tail=True
                     ),
                 )
             except Exception:
                 log.exception("update interrupted card failed")
+        self._clear_progress(active["id"])
         await self.feishu.send_text_async(
             chat_id, f"已向会话 {title} 发送中止请求。"
         )
@@ -3757,6 +3852,11 @@ class Bridge:
         if session_id and session_id not in self._session_ids:
             return
 
+        location = event.get("location") or {}
+        directory = (
+            location.get("directory") if isinstance(location, dict) else None
+        )
+
         if event_type == "permission.asked":
             await self._on_permission_asked(data)
         elif event_type == "permission.replied":
@@ -3781,18 +3881,40 @@ class Bridge:
             )
         elif event_type == "session.retry.scheduled":
             await self._on_retry_scheduled(session_id, data)
+        elif event_type == "session.step.started":
+            await self._on_step_started(session_id, data)
+        elif event_type == "session.step.first-token":
+            await self._on_step_first_token(session_id)
+        elif event_type == "session.reasoning.delta":
+            await self._on_stream_delta(session_id, "reasoning", data)
+        elif event_type == "session.reasoning.ended":
+            await self._on_stream_ended(session_id, "reasoning", data)
+        elif event_type == "session.text.delta":
+            await self._on_stream_delta(session_id, "text", data)
         elif event_type == "session.tool.input.started":
             self._tool_names[data.get("id", "")] = data.get("name", "")
+            await self._on_tool_input_started(session_id, data)
         elif event_type == "session.tool.called":
             await self._on_tool_event(session_id, "called", data)
+        elif event_type == "session.tool.progress":
+            await self._on_tool_progress(session_id, data, directory)
         elif event_type == "session.tool.success":
             await self._on_tool_event(session_id, "success", data)
         elif event_type == "session.tool.failed":
             await self._on_tool_event(session_id, "failed", data)
+        elif event_type == "session.shell.started":
+            await self._on_shell_started(session_id, data, directory)
+        elif event_type == "session.shell.ended":
+            await self._on_shell_ended(session_id, data)
         elif event_type == "session.text.ended":
-            self._final_text[session_id] = data.get("text") or ""
+            await self._on_text_ended(session_id, data)
         elif event_type == "session.usage.updated":
             self._usage[session_id] = data
+            await self._on_usage_updated(session_id, data)
+        elif event_type == "session.compaction.started":
+            await self._on_compaction(session_id, "started")
+        elif event_type == "session.compaction.ended":
+            await self._on_compaction(session_id, "ended")
         elif event_type == "session.error":
             await self._on_session_error(session_id, data)
 
@@ -3805,7 +3927,362 @@ class Bridge:
             return
         if not self.db.mark_task_running(task["id"]):
             return
-        await self._update_progress(task, status="执行中", force=True)
+        state = self._progress_state(task["id"])
+        state.status = "执行中"
+        state.phase = "启动"
+        state.add_line("▶ 开始执行")
+        await self._schedule_progress(task, force=True)
+
+    # ------------------------------------------------------------------
+    # realtime progress state
+    # ------------------------------------------------------------------
+    def _progress_state(self, task_id: int) -> _TaskProgress:
+        state = self._progress.get(task_id)
+        if state is None:
+            state = _TaskProgress()
+            self._progress[task_id] = state
+        return state
+
+    def _active_progress(
+        self, session_id: str | None
+    ) -> tuple[dict[str, Any] | None, _TaskProgress | None]:
+        if not session_id:
+            return None, None
+        task = self.db.get_active_task(session_id)
+        if not task:
+            return None, None
+        return task, self._progress_state(task["id"])
+
+    async def _schedule_progress(
+        self, task: dict[str, Any], *, force: bool = False
+    ) -> None:
+        """节流刷新：事件只改内存状态，卡片更新放到后台任务里做。
+
+        这样 SSE 消费循环不会被飞书/OpenCode 的网络请求阻塞。
+        """
+        state = self._progress_state(task["id"])
+        state.dirty = True
+        if state.closed:
+            return
+        now = time.time()
+        interval = max(1, self.cfg.progress_min_interval)
+        deadline = state.last_push + interval
+        delay = 0.0 if force or now >= deadline else deadline - now
+        if state.timer is not None and not state.timer.done():
+            # 已有刷新任务在跑，它结束后会检查 dirty 并补一次尾随刷新。
+            return
+        timer = asyncio.create_task(self._flush_later(task["id"], delay))
+        state.timer = timer
+        self._background_tasks.add(timer)
+        timer.add_done_callback(self._background_tasks.discard)
+
+    async def _flush_later(self, task_id: int, delay: float) -> None:
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._flush_progress(task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("flush progress for task %s failed", task_id)
+
+    async def _flush_progress(self, task_id: int) -> None:
+        state = self._progress.get(task_id)
+        if state is None or not state.dirty or state.closed:
+            return
+        task = self.db.get_task(task_id)
+        if not task or task["status"] not in ("queued", "running"):
+            return
+        state.dirty = False
+        state.last_push = time.time()
+        await self._collect_shell_output(task, state)
+        if state.closed:
+            return
+        if task.get("card_message_id"):
+            try:
+                await self.feishu.update_card_async(
+                    task["card_message_id"], self._progress_card(task, state)
+                )
+            except Exception:
+                log.exception("update progress card failed")
+        if state.shell_id and not state.closed:
+            # 命令还在跑：即使没有新事件，也按节流间隔继续拉取输出。
+            state.dirty = True
+        if state.dirty and not state.closed:
+            # 当前刷新任务还没结束，先清掉引用，才能排下一次尾随刷新。
+            state.timer = None
+            await self._schedule_progress(task)
+
+    async def _collect_shell_output(
+        self, task: dict[str, Any], state: _TaskProgress
+    ) -> bool:
+        if not state.shell_id or state.collecting:
+            return False
+        state.collecting = True
+        try:
+            return await self._collect_shell_output_locked(task, state)
+        finally:
+            state.collecting = False
+
+    async def _collect_shell_output_locked(
+        self, task: dict[str, Any], state: _TaskProgress
+    ) -> bool:
+        if not state.shell_id:
+            return False
+        method = getattr(self.oc, "shell_output", None)
+        if method is None:
+            return False
+        for _ in range(4):
+            cursor_before = state.cursor
+            try:
+                chunk = await method(
+                    task["session_id"],
+                    state.shell_id,
+                    directory=state.shell_dir,
+                    cursor=cursor_before,
+                    limit=_PROGRESS_SHELL_CHUNK,
+                )
+            except OpenCodeError as exc:
+                if exc.status_code == 404:
+                    state.shell_id = None
+                return False
+            except Exception as exc:
+                log.debug("read shell output failed: %s", exc)
+                return False
+            if state.cursor != cursor_before:
+                # 另一条路径已经推进过游标，丢弃这次重复结果。
+                return False
+            if not isinstance(chunk, dict):
+                return False
+            output = chunk.get("output")
+            if isinstance(output, str) and output:
+                state.add_output(output)
+            previous = state.cursor
+            cursor = chunk.get("cursor")
+            if isinstance(cursor, int):
+                state.cursor = cursor
+            if chunk.get("truncated"):
+                state.truncated = True
+            if not chunk.get("truncated") or state.cursor == previous:
+                break
+        return True
+
+    def _progress_card(
+        self, task: dict[str, Any], state: _TaskProgress
+    ) -> dict[str, Any]:
+        return progress_card(
+            status=state.status,
+            prompt=task["prompt"],
+            tool=state.tool or None,
+            phase=state.phase or None,
+            elapsed=self._task_elapsed(task),
+            session_id=task["session_id"],
+            usage=self._usage.get(task["session_id"]),
+            log_tail=state.window(),
+            log_full=state.full_log(),
+        )
+
+    def _clear_progress(self, task_id: int) -> None:
+        state = self._progress.pop(task_id, None)
+        if state is None:
+            return
+        state.closed = True
+        if state.timer is not None:
+            state.timer.cancel()
+
+    async def _on_step_started(
+        self, session_id: str, data: dict[str, Any]
+    ) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        state.step += 1
+        state.status = "执行中"
+        state.phase = "模型思考中"
+        state.add_line(f"◆ 步骤 {state.step} 开始")
+        await self._schedule_progress(task)
+
+    async def _on_step_first_token(self, session_id: str) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        state.phase = "模型输出中"
+        await self._schedule_progress(task)
+
+    async def _on_stream_delta(
+        self, session_id: str, kind: str, data: dict[str, Any]
+    ) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        delta = data.get("delta")
+        if not isinstance(delta, str) or not delta:
+            return
+        state.phase = "模型思考中" if kind == "reasoning" else "模型输出中"
+        state.partial_kind = kind
+        state.set_partial(state.partial + delta)
+        await self._schedule_progress(task)
+
+    async def _on_stream_ended(
+        self, session_id: str, kind: str, data: dict[str, Any]
+    ) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        text = data.get("text")
+        if not isinstance(text, str) or not text:
+            text = state.partial
+        state.partial = ""
+        state.partial_kind = ""
+        if kind == "reasoning":
+            state.phase = "思考完成"
+            if text:
+                state.add_line("💭 " + _short(text.replace("\n", " "), 200))
+        else:
+            state.phase = "输出完成"
+            if text:
+                state.add_line("💬 " + _short(text.replace("\n", " "), 200))
+        await self._schedule_progress(task)
+
+    async def _on_text_ended(
+        self, session_id: str, data: dict[str, Any]
+    ) -> None:
+        self._final_text[session_id] = data.get("text") or ""
+        await self._on_stream_ended(session_id, "text", data)
+
+    async def _on_tool_input_started(
+        self, session_id: str, data: dict[str, Any]
+    ) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        name = data.get("name") or "tool"
+        state.tool = str(name)
+        state.phase = f"准备调用 {name}"
+        await self._schedule_progress(task)
+
+    async def _on_tool_progress(
+        self,
+        session_id: str,
+        data: dict[str, Any],
+        directory: str | None,
+    ) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        metadata = data.get("metadata") or {}
+        shell_id = None
+        if isinstance(metadata, dict):
+            shell_id = (
+                metadata.get("shellID")
+                or metadata.get("shellId")
+                or metadata.get("shell_id")
+            )
+            if not shell_id:
+                shell = metadata.get("shell")
+                if isinstance(shell, dict):
+                    shell_id = shell.get("id")
+        if not shell_id:
+            return
+        shell_id = str(shell_id)
+        # 同一个 shell 会多次上报 progress，只有换了 shell 才重置游标，
+        # 否则会把已经读过的输出重复追加一遍。
+        if state.shell_id != shell_id:
+            state.cursor = 0
+        state.shell_id = shell_id
+        state.shell_dir = directory or state.shell_dir
+        state.status = "执行中"
+        state.phase = "命令执行中"
+        state.tool = "shell"
+        await self._schedule_progress(task)
+
+    async def _on_shell_started(
+        self,
+        session_id: str,
+        data: dict[str, Any],
+        directory: str | None,
+    ) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        shell = data.get("shell") or {}
+        if not isinstance(shell, dict):
+            return
+        shell_id = shell.get("id")
+        if not shell_id:
+            return
+        state.shell_id = str(shell_id)
+        state.shell_dir = directory or shell.get("cwd") or state.shell_dir
+        state.cursor = 0
+        state.status = "执行中"
+        state.phase = "命令执行中"
+        state.tool = "shell"
+        command = shell.get("command")
+        if command:
+            state.add_line("$ " + _short(str(command), 200))
+        await self._schedule_progress(task)
+
+    async def _on_shell_ended(
+        self, session_id: str, data: dict[str, Any]
+    ) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        # 先做一次增量读取，避免漏掉最后一段输出。
+        await self._collect_shell_output(task, state)
+        output = data.get("output") or {}
+        if isinstance(output, dict):
+            text = output.get("output")
+            if isinstance(text, str) and text:
+                # 事件里带的是完整输出；按已读游标只取后缀，避免重复。
+                start = state.cursor
+                if start > 0:
+                    raw = text.encode("utf-8")
+                    text = raw[start:].decode("utf-8", "ignore")
+                if text:
+                    state.add_output(text)
+            if output.get("truncated"):
+                state.truncated = True
+        shell = data.get("shell") or {}
+        shell_status = None
+        exit_code = None
+        if isinstance(shell, dict):
+            shell_status = shell.get("status")
+            exit_code = shell.get("exit")
+        state.flush_output()
+        state.shell_id = None
+        state.cursor = 0
+        failed = shell_status in ("timeout", "killed") or (
+            isinstance(exit_code, (int, float)) and exit_code != 0
+        )
+        if failed:
+            state.phase = "命令失败"
+            state.add_line(
+                f"✗ 命令结束（status={shell_status}, exit={exit_code}）"
+            )
+        else:
+            state.phase = "命令结束"
+        await self._schedule_progress(task)
+
+    async def _on_usage_updated(
+        self, session_id: str, data: dict[str, Any]
+    ) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        await self._schedule_progress(task)
+
+    async def _on_compaction(self, session_id: str, phase: str) -> None:
+        task, state = self._active_progress(session_id)
+        if not task or not state:
+            return
+        if phase == "started":
+            state.phase = "压缩上下文"
+            state.add_line("⟳ 开始压缩上下文")
+        else:
+            state.phase = "上下文已压缩"
+            state.add_line("✓ 上下文压缩完成")
+        await self._schedule_progress(task)
 
     async def _on_tool_event(
         self, session_id: str, phase: str, data: dict[str, Any]
@@ -3822,14 +4299,19 @@ class Bridge:
         if phase == "called":
             summary = _summarize_input(tool, data.get("input") or {})
             status = "调用工具"
+            marker = "▶"
         elif phase == "success":
             summary = _summarize_output(data)
             status = "工具完成"
+            marker = "✓"
         else:
             summary = _summarize_output(data)
             status = "工具失败"
+            marker = "✗"
 
         label = f"{tool} {summary}".strip()
+        state = self._progress_state(task["id"])
+        state.add_line(f"{marker} {label}")
         await self._update_progress(task, status=status, tool=label)
 
     async def _update_progress(
@@ -3838,30 +4320,16 @@ class Bridge:
         *,
         status: str,
         tool: str | None = None,
+        phase: str | None = None,
         force: bool = False,
     ) -> None:
-        now = time.time()
-        last = self._progress_last.get(task["id"], 0.0)
-        if not force and now - last < self.cfg.progress_min_interval:
-            return
-        self._progress_last[task["id"]] = now
-
-        elapsed = int(now - self._started_at.get(task["id"], now))
-        card = progress_card(
-            status=status,
-            prompt=task["prompt"],
-            tool=tool,
-            elapsed=elapsed,
-            session_id=task["session_id"],
-        )
-        if not task.get("card_message_id"):
-            return
-        try:
-            await self.feishu.update_card_async(
-                task["card_message_id"], card
-            )
-        except Exception:
-            log.exception("update progress card failed")
+        state = self._progress_state(task["id"])
+        state.status = status
+        if tool is not None:
+            state.tool = tool
+        if phase is not None:
+            state.phase = phase
+        await self._schedule_progress(task, force=force)
 
     async def _on_execution_finished(
         self,
@@ -3904,9 +4372,12 @@ class Bridge:
             task["id"],
             error,
         )
+        state = self._progress_state(task["id"])
+        state.add_line(f"⟳ 上游报错，重试中（第 {attempt} 次）")
         await self._update_progress(
             task,
             status=f"上游报错，重试中（第 {attempt} 次）",
+            phase="等待重试",
             force=True,
         )
         if attempt == 1:
@@ -3923,12 +4394,48 @@ class Bridge:
         task = self.db.get_active_task(session_id)
         if not task:
             return
+        state = self._progress_state(task["id"])
+        state.add_line("✗ 会话错误: " + _short(error, 200))
         await self._finish_task_failure(task, error)
 
     def _task_elapsed(self, task: dict[str, Any]) -> int:
         return int(
             time.time()
             - self._started_at.get(task["id"], task["created_at"])
+        )
+
+    def _final_progress_card(
+        self,
+        task: dict[str, Any],
+        *,
+        status: str,
+        error: str | None = None,
+        final_text: str | None = None,
+        show_result: bool = True,
+        usage: dict[str, Any] | None = None,
+        with_tail: bool = True,
+    ) -> dict[str, Any]:
+        state = self._progress.get(task["id"])
+        if state is not None:
+            # 终态卡片一旦开始构建，就冻结实时状态，避免在途的节流刷新
+            # 用「执行中」卡片覆盖最终结果。
+            state.closed = True
+            if state.timer is not None:
+                state.timer.cancel()
+        return progress_card(
+            status=status,
+            prompt=task["prompt"],
+            tool=state.tool if state else None,
+            phase=state.phase if state else None,
+            elapsed=self._task_elapsed(task),
+            final_text=final_text,
+            error=error,
+            session_id=task["session_id"],
+            usage=usage,
+            max_final_chars=self.cfg.max_final_chars,
+            show_result=show_result,
+            log_tail=state.window() if state and with_tail else None,
+            log_full=state.full_log() if state else None,
         )
 
     async def _finish_task_success(
@@ -3940,18 +4447,16 @@ class Bridge:
         if not self.db.complete_task(
             task["id"], "succeeded", final_text=final_text
         ):
+            self._clear_progress(task["id"])
             return
         session_id = task["session_id"]
         self._touch_session(session_id)
-        elapsed = self._task_elapsed(task)
-        result_card = progress_card(
+        result_card = self._final_progress_card(
+            task,
             status="完成",
-            prompt=task["prompt"],
-            elapsed=elapsed,
             final_text=final_text or "（无文本输出）",
-            session_id=session_id,
             usage=usage,
-            max_final_chars=self.cfg.max_final_chars,
+            with_tail=False,
         )
         # 原进度卡只收尾成「完成」，结果单独在聊天底部发一张新卡。
         # 飞书更新卡片不会触发消息通知，只更新原卡用户很容易错过结果；
@@ -3960,14 +4465,13 @@ class Bridge:
             try:
                 await self.feishu.update_card_async(
                     task["card_message_id"],
-                    progress_card(
+                    self._final_progress_card(
+                        task,
                         status="完成",
-                        prompt=task["prompt"],
-                        elapsed=elapsed,
                         final_text="",
                         show_result=False,
-                        session_id=session_id,
                         usage=usage,
+                        with_tail=True,
                     ),
                 )
             except Exception:
@@ -3989,6 +4493,7 @@ class Bridge:
             await self._deliver_outbox(task["chat_id"], open_id)
         except Exception:
             log.exception("deliver outbox failed for task %s", task["id"])
+        self._clear_progress(task["id"])
         log.info("task %s succeeded", task["id"])
 
     async def _finish_task_failure(
@@ -3997,16 +4502,12 @@ class Bridge:
         if not self.db.complete_task(
             task["id"], "failed", error=error
         ):
+            self._clear_progress(task["id"])
             return
         session_id = task["session_id"]
         self._touch_session(session_id)
-        elapsed = self._task_elapsed(task)
-        card = progress_card(
-            status="失败",
-            prompt=task["prompt"],
-            elapsed=elapsed,
-            error=error,
-            session_id=session_id,
+        card = self._final_progress_card(
+            task, status="失败", error=error, with_tail=True
         )
         if task.get("card_message_id"):
             try:
@@ -4018,6 +4519,7 @@ class Bridge:
         await self.feishu.send_text_async(
             task["chat_id"], f"任务失败: {error}"
         )
+        self._clear_progress(task["id"])
         log.info("task %s failed: %s", task["id"], error)
 
     async def _finish_task_interrupted(
@@ -4026,16 +4528,12 @@ class Bridge:
         if not self.db.complete_task(
             task["id"], "interrupted", error=reason
         ):
+            self._clear_progress(task["id"])
             return
         session_id = task["session_id"]
         self._touch_session(session_id)
-        elapsed = self._task_elapsed(task)
-        card = progress_card(
-            status="已中止",
-            prompt=task["prompt"],
-            elapsed=elapsed,
-            error=reason,
-            session_id=session_id,
+        card = self._final_progress_card(
+            task, status="已中止", error=reason, with_tail=True
         )
         if task.get("card_message_id"):
             try:
@@ -4047,6 +4545,7 @@ class Bridge:
         await self.feishu.send_text_async(
             task["chat_id"], f"任务已中止: {reason}"
         )
+        self._clear_progress(task["id"])
         log.info("task %s interrupted: %s", task["id"], reason)
 
     # ------------------------------------------------------------------
@@ -4561,17 +5060,15 @@ class Bridge:
             current_task = self.db.get_task(task_id)
             if current_task and current_task["status"] == "interrupted":
                 self.db.update_form(form["id"], interrupted=1)
+            self._clear_progress(task_id)
             return False
         self.db.update_form(form["id"], interrupted=1)
         if task.get("card_message_id"):
             try:
                 await self.feishu.update_card_async(
                     task["card_message_id"],
-                    progress_card(
-                        status="已中止",
-                        prompt=task["prompt"],
-                        error=reason,
-                        session_id=task["session_id"],
+                    self._final_progress_card(
+                        task, status="已中止", error=reason, with_tail=True
                     ),
                 )
             except Exception:
@@ -4579,6 +5076,7 @@ class Bridge:
         await self.feishu.send_text_async(
             task["chat_id"], f"任务 #{task_id} 已中断：{reason}"
         )
+        self._clear_progress(task_id)
         return True
 
     async def _cancel_forms_for_session(
@@ -4914,12 +5412,13 @@ class Bridge:
             try:
                 await self.feishu.update_card_async(
                     task["card_message_id"],
-                    progress_card(
+                    self._final_progress_card(
+                        task,
                         status="失败",
-                        prompt=task["prompt"],
                         error="审批超时，已自动拒绝",
-                        session_id=task["session_id"],
+                        with_tail=True,
                     ),
                 )
             except Exception:
                 log.exception("update timeout task card failed")
+        self._clear_progress(task_id)

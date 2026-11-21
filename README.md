@@ -253,6 +253,17 @@ scripts/smoke-test.sh --users config/users.json
 
 bridge 启动时会把顶层命令同步到飞书输入框 `/` 面板：缺失的创建、描述变化的更新、已从命令目录移除的删除。需要应用开通 `application:app_slash_command:read/write`；同步失败只记日志，不影响机器人收发消息。
 
+## 实时进度卡片
+
+任务执行期间，bridge 会订阅 OpenCode 的实时事件（`session.step.*`、`session.reasoning.delta`、`session.text.delta`、`session.tool.*`、`session.shell.*`），并在原进度卡上就地重绘：
+
+- 状态区显示当前状态、阶段（思考/输出/调用工具/命令执行）、当前工具、已用时和 token。
+- 「实时日志」固定显示最后 12 行，不足补空行，卡片高度不会随日志增长。
+- shell 输出通过 `GET /api/shell/{id}/output` 按字节游标增量拉取，stdout/stderr 合并展示。
+- 完整日志（最近 200 行，内存上限）放在折叠面板里，点击展开；不落文件。
+- 卡片更新按 `BRIDGE_PROGRESS_MIN_INTERVAL` 节流（默认 5 秒）；任务结束会强制刷新一次，保证最终状态一定落到卡片上。
+- 流式信息只更新原进度卡，不额外发新卡；结果卡仍是任务完成后单独发送的一张新卡。
+
 ## 多会话并行
 
 - 一个飞书聊天可以绑定多个 OpenCode 会话，`chats.session_id` 是「当前会话」。
@@ -377,7 +388,7 @@ OpenCode 的 `question` 工具会创建 form，等待用户输入。bridge 把�
 
 - `BRIDGE_TASK_TIMEOUT_SECONDS`：任务超时，默认 7200（2 小时）
 - `BRIDGE_TASK_RECONCILE_SECONDS` / `BRIDGE_TASK_RECONCILE_GRACE_SECONDS`：对账间隔与宽限
-- `BRIDGE_PROGRESS_MIN_INTERVAL`：进度卡片最小更新间隔
+- `BRIDGE_PROGRESS_MIN_INTERVAL`：进度卡片实时刷新间隔（秒），默认 5；事件只更新内存状态，卡片按此间隔节流重绘，任务结束会强制刷新一次
 - `BRIDGE_PERMISSION_REMIND_SECONDS` / `BRIDGE_PERMISSION_EXPIRE_SECONDS`：审批提醒/超时
 - `BRIDGE_FORM_REMIND_SECONDS` / `BRIDGE_FORM_EXPIRE_SECONDS`：提问提醒/超时
 - `BRIDGE_MAX_FINAL_CHARS` / `BRIDGE_MAX_TEXT_CHUNK`：结果截断与消息分片

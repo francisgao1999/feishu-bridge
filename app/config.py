@@ -162,7 +162,7 @@ def load_config() -> Config:
         model_id=_env("OPENCODE_MODEL_ID", "big-pickle"),
         db_path=_path("BRIDGE_DB", data_dir / "bridge.db", data_dir),
         log_path=_path("BRIDGE_LOG", data_dir / "bridge.log", data_dir),
-        progress_min_interval=_env_int("BRIDGE_PROGRESS_MIN_INTERVAL", 20),
+        progress_min_interval=_env_int("BRIDGE_PROGRESS_MIN_INTERVAL", 5),
         permission_remind_seconds=_env_int("BRIDGE_PERMISSION_REMIND_SECONDS", 600),
         permission_expire_seconds=_env_int("BRIDGE_PERMISSION_EXPIRE_SECONDS", 1800),
         form_remind_seconds=_env_int("BRIDGE_FORM_REMIND_SECONDS", 300),

@@ -308,5 +308,49 @@ class ListDirTest(unittest.TestCase):
         self.assertEqual(entries[0]["type"], "file")
 
 
+class ShellOutputTest(unittest.TestCase):
+    def test_unwraps_data_and_passes_cursor(self):
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["path"] = request.url.path
+            seen["query"] = request.url.query.decode()
+            return httpx.Response(
+                200,
+                json={
+                    "location": {"directory": "/workspace"},
+                    "data": {
+                        "output": "hello\n",
+                        "cursor": 6,
+                        "size": 6,
+                        "truncated": False,
+                    },
+                },
+            )
+
+        client = OpenCodeClient("http://10.0.0.11:4096", "u", "p")
+        client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="http://10.0.0.11:4096",
+            auth=("u", "p"),
+        )
+        self.addCleanup(lambda: asyncio.run(client.close()))
+
+        chunk = asyncio.run(
+            client.shell_output(
+                "sh_1",
+                directory="/workspace",
+                cursor=0,
+                limit=1024,
+            )
+        )
+        self.assertEqual(chunk["output"], "hello\n")
+        self.assertEqual(chunk["cursor"], 6)
+        self.assertEqual(seen["path"], "/api/shell/sh_1/output")
+        self.assertIn("cursor=0", seen["query"])
+        self.assertIn("limit=1024", seen["query"])
+        self.assertIn("location%5Bdirectory%5D=%2Fworkspace", seen["query"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -404,6 +404,30 @@ class OpenCodeClient:
     async def interrupt(self, session_id: str) -> Any:
         return await self._request("POST", f"/api/session/{session_id}/interrupt")
 
+    async def shell_output(
+        self,
+        shell_id: str,
+        *,
+        directory: str | None = None,
+        cursor: int = 0,
+        limit: int = 65536,
+    ) -> dict[str, Any]:
+        """按字节游标增量读取 shell 的 stdout+stderr。"""
+        params: dict[str, str] = {
+            "cursor": str(int(cursor)),
+            "limit": str(int(limit)),
+        }
+        if directory:
+            params["location[directory]"] = directory
+        data = await self._request(
+            "GET", f"/api/shell/{shell_id}/output", params=params
+        )
+        if isinstance(data, dict):
+            payload = data.get("data")
+            if isinstance(payload, dict):
+                return payload
+        return {}
+
     async def list_models(self) -> list[dict[str, str]]:
         try:
             data = await self._request("GET", "/api/model")
@@ -852,6 +876,22 @@ class OpenCodeRouter:
 
     async def interrupt(self, session_id: str) -> Any:
         return await self.client_for_session(session_id).interrupt(session_id)
+
+    async def shell_output(
+        self,
+        session_id: str,
+        shell_id: str,
+        *,
+        directory: str | None = None,
+        cursor: int = 0,
+        limit: int = 65536,
+    ) -> dict[str, Any]:
+        return await self.client_for_session(session_id).shell_output(
+            shell_id,
+            directory=directory,
+            cursor=cursor,
+            limit=limit,
+        )
 
     async def reply_permission(
         self, session_id: str, permission_id: str, decision: str

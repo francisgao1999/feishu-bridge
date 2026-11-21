@@ -1,12 +1,86 @@
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
+
+# 进度卡片实时日志窗口固定显示的行数。窗口高度必须稳定，
+# 否则卡片会随着日志增长不断变高。
+PROGRESS_LOG_LINES = 12
+# 单行日志在卡片里的最大显示宽度（按半角字符计）。
+PROGRESS_LOG_WIDTH = 80
 
 
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n\n…（已截断，共 {len(text)} 字符）"
+
+
+def _display_width(text: str) -> int:
+    width = 0
+    for char in text:
+        if unicodedata.east_asian_width(char) in ("W", "F"):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _clip_width(text: str, limit: int) -> str:
+    """按显示宽度截断，避免长行在卡片里换行撑高。"""
+    text = text.replace("\t", "    ")
+    if _display_width(text) <= limit:
+        return text
+    out: list[str] = []
+    width = 0
+    for char in text:
+        char_width = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        if width + char_width > limit - 1:
+            break
+        out.append(char)
+        width += char_width
+    return "".join(out) + "…"
+
+
+def _fenced(text: str) -> str:
+    """用三反引号围栏包裹文本；内容里的反引号后插入零宽空格，避免破坏围栏。"""
+    safe = text.replace("`", "`\u200b")
+    return f"```text\n{safe}\n```"
+
+
+def _log_window(
+    lines: list[str],
+    *,
+    count: int = PROGRESS_LOG_LINES,
+    width: int = PROGRESS_LOG_WIDTH,
+) -> str:
+    """固定高度的尾部窗口：不足行数时在顶部补空行，保持卡片高度不变。"""
+    window = [_clip_width(line, width) for line in lines[-count:]]
+    while len(window) < count:
+        window.insert(0, " ")
+    return _fenced("\n".join(window))
+
+
+def _collapsible_log(text: str, title: str) -> dict[str, Any]:
+    return {
+        "tag": "collapsible_panel",
+        "expanded": False,
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "vertical_align": "center",
+            "icon": {
+                "tag": "standard_icon",
+                "token": "down-small-ccm_outlined",
+                "size": "16px 16px",
+            },
+            "icon_position": "right",
+            "icon_expanded_angle": -180,
+        },
+        "border": {"color": "grey", "corner_radius": "5px"},
+        "vertical_spacing": "4px",
+        "padding": "4px 8px 4px 8px",
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": _fenced(text)}}],
+    }
 
 
 def _clip(text: str, limit: int) -> str:
@@ -48,6 +122,10 @@ def progress_card(
     usage: dict[str, Any] | None = None,
     max_final_chars: int = 3000,
     show_result: bool = True,
+    phase: str | None = None,
+    log_tail: list[str] | None = None,
+    log_full: str | None = None,
+    log_lines: int = PROGRESS_LOG_LINES,
 ) -> dict[str, Any]:
     if status in ("已中止", "已中断"):
         template = "grey"
@@ -67,20 +145,24 @@ def progress_card(
         {"tag": "hr"},
     ]
 
-    status_lines = [f"**状态**: {status}"]
-    if tool:
-        status_lines.append(f"**当前工具**: {tool}")
-    if elapsed is not None:
-        status_lines.append(f"**已用时**: {elapsed} 秒")
-    if usage:
-        tokens = usage.get("tokens") or {}
-        status_lines.append(
-            "**Token**: 输入 "
-            f"{tokens.get('input', 0)} / 输出 {tokens.get('output', 0)}"
-        )
-        cost = usage.get("cost")
-        if cost:
-            status_lines.append(f"**费用**: {cost}")
+    # 状态区固定行数，避免不同阶段卡片高度跳动。
+    # 每行都按显示宽度裁剪，防止长阶段名/工具名换行把卡片撑高。
+    state_line = f"**状态**: {_clip_width(status, 28)}"
+    if phase:
+        state_line += f" · **阶段**: {_clip_width(phase, 16)}"
+    status_lines = [state_line, f"**当前工具**: {_clip_width(tool or '-', 36)}"]
+    status_lines.append(
+        f"**已用时**: {elapsed} 秒" if elapsed is not None else "**已用时**: -"
+    )
+    tokens = (usage or {}).get("tokens") or {}
+    cost = (usage or {}).get("cost")
+    token_line = (
+        "**Token**: 输入 "
+        f"{str(tokens.get('input', 0))[:12]} / 输出 "
+        f"{str(tokens.get('output', 0))[:12]}"
+        f" · **费用**: {str(cost or '-')[:12]}"
+    )
+    status_lines.append(token_line)
     elements.append(_md("\n".join(status_lines)))
 
     if error:
@@ -90,6 +172,16 @@ def progress_card(
         elements.append({"tag": "hr"})
         elements.append(_md("**结果**"))
         elements.append(_plain(final_text, limit=max_final_chars))
+
+    if log_tail:
+        elements.append({"tag": "hr"})
+        elements.append(_md("**实时日志**"))
+        elements.append(_md(_log_window(log_tail, count=log_lines)))
+
+    if log_full:
+        line_count = log_full.count("\n") + 1
+        panel_title = f"完整日志（{line_count} 行）"
+        elements.append(_collapsible_log(log_full, panel_title))
 
     if session_id:
         elements.append(_note(f"会话 {session_id}"))
