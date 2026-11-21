@@ -169,10 +169,10 @@ check_user() {
     return
   fi
 
-  # 4. 读回
+  # 4. 读回。v2 的 fs/read 必须带 location[directory]，否则 404。
   code="$(curl -sS -o "$dst" -w '%{http_code}' \
       --max-time 120 -u "$auth" \
-      "$base/api/fs/read/%2Ftmp%2Fopencode-smoke.bin" \
+      "$base/api/fs/read/%2Ftmp%2Fopencode-smoke.bin?location%5Bdirectory%5D=%2Ftmp" \
       2>/dev/null || true)"
   if [ "$code" != "200" ]; then
     fail "$label" "读取 $SMOKE_PATH" "返回 $code"

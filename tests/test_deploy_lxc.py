@@ -43,5 +43,22 @@ class ProxyConfigTest(unittest.TestCase):
         self.assertIn("出站代理", text)
 
 
+class SmokeScriptTest(unittest.TestCase):
+    """冒烟脚本是发布前的强制检查，接口路径必须和 opencode v2 保持一致。"""
+
+    def test_read_back_includes_directory_param(self):
+        text = (REPO_ROOT / "scripts" / "smoke-test.sh").read_text(encoding="utf-8")
+        # v2 的 /api/fs/read 不带 location[directory] 会返回 404
+        self.assertIn(
+            "/api/fs/read/%2Ftmp%2Fopencode-smoke.bin?location%5Bdirectory%5D=%2Ftmp",
+            text,
+        )
+
+    def test_write_uses_experimental_endpoint(self):
+        text = (REPO_ROOT / "scripts" / "smoke-test.sh").read_text(encoding="utf-8")
+        self.assertIn("/api/experimental/fs/write", text)
+        self.assertIn("location%5Bdirectory%5D=%2Ftmp", text)
+
+
 if __name__ == "__main__":
     sys.exit(unittest.main())
