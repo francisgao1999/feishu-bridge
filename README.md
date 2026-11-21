@@ -147,7 +147,7 @@ cd /path/to/feishu-bridge
 ./deploy/lxc/add-user.sh alice ou_xxxxxxxx 10.0.0.11
 ```
 
-脚本会克隆模板、设置 IP、生成密码、启动 opencode、写入 `users.json`、跑冒烟。`users.json` 通过目录挂载热加载，**不需要重启 bridge**。
+脚本会克隆模板、设置 IP、生成密码、启动 opencode、写入 `users.json`、跑冒烟。用户 LXC 默认从 VMID `901` 开始编号，避免和基础设施 LXC（`100`/`101`/`102`）混在一起；可用 `--start-id` 调整起始号。`users.json` 通过目录挂载热加载，**不需要重启 bridge**。
 
 完整参数与排错见 [`docs/lxc-scripts.md`](docs/lxc-scripts.md)。
 

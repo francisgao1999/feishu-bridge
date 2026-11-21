@@ -35,6 +35,7 @@ cd /root/feishu-opencode-bridge          # 仓库目录（在 PVE 宿主上）
 | `open_id` | 是 | — | 飞书 `open_id`，`ou_` 开头 |
 | `ip` | 是 | — | 固定 IP，脚本只校验格式与是否被占用 |
 | `--template <id>` | 否 | `900` | 模板 LXC ID |
+| `--start-id <id>` | 否 | `901` | 用户 LXC 起始 VMID，从该号向上找第一个空闲号 |
 | `--docker-lxc <id>` | 否 | `100` | 运行 bridge 的 docker LXC ID |
 | `--gateway <ip>` | 否 | `10.0.0.1` | 网关 |
 | `--bridge <name>` | 否 | `vmbr0` | PVE 网桥 |
@@ -48,12 +49,14 @@ cd /root/feishu-opencode-bridge          # 仓库目录（在 PVE 宿主上）
 | `--dry-run` | 否 | 关 | 只打印命令，不实际执行 |
 | `-h, --help` | 否 | — | 显示帮助 |
 
+> 用户 LXC 默认从 `901` 开始编号，避免和基础设施 LXC（100/101/102）混在一起；`--start-id` 可改起始号。起始号被占用时会自动向上找第一个空闲号。
+
 ### 1.3 执行步骤
 
 1. 校验参数、模板存在、docker LXC 存在
 2. `ping` 检查 IP 未被占用
 3. 检查 `users.json` 中是否已有同 `slug` 或同 `open_id`
-4. `pvesh get /cluster/nextid` 取下一个 VMID
+4. 从 `--start-id`（默认 `901`）开始找第一个空闲 VMID；若 PVE 的 `nextid` 已经大于等于起始号，则直接用它
 5. `pct clone 900 <vmid> --hostname oc-<slug> --full`
 6. `pct set` 网络、内存、swap、cores
 7. `pct start`，等待 `/etc/opencode/ready`（最长约 60 秒）

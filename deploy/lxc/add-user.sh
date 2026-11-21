@@ -7,6 +7,8 @@
 set -euo pipefail
 
 TEMPLATE=900
+START_ID=901
+MAX_ID=9999
 DOCKER_LXC=100
 GATEWAY=10.0.0.1
 BRIDGE=vmbr0
@@ -35,6 +37,7 @@ usage() {
 
 选项：
   --template <id>       模板 LXC ID（默认 900）
+  --start-id <id>       用户 LXC 起始 VMID（默认 901，从该 ID 向上找第一个空闲号）
   --docker-lxc <id>     运行 bridge 的 docker LXC ID（默认 100）
   --gateway <ip>        网关（默认 10.0.0.1）
   --bridge <name>       PVE 网桥（默认 vmbr0）
@@ -80,6 +83,7 @@ run() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --template) TEMPLATE="$2"; shift 2 ;;
+    --start-id) START_ID="$2"; shift 2 ;;
     --docker-lxc) DOCKER_LXC="$2"; shift 2 ;;
     --gateway) GATEWAY="$2"; shift 2 ;;
     --bridge) BRIDGE="$2"; shift 2 ;;
@@ -122,6 +126,9 @@ command -v curl >/dev/null 2>&1 || die "未找到 curl"
 [[ "$CORES" =~ ^[0-9]+$ ]] || die "--cores 必须是整数"
 [[ "$PREFIX" =~ ^[0-9]{1,2}$ ]] || die "--prefix 必须是 1-32 的整数"
 [ "$PREFIX" -ge 1 ] && [ "$PREFIX" -le 32 ] || die "--prefix 必须在 1-32 之间"
+[[ "$START_ID" =~ ^[0-9]+$ ]] || die "--start-id 必须是整数"
+[ "$START_ID" -ge 100 ] || die "--start-id 必须 >= 100"
+[ "$START_ID" -le "$MAX_ID" ] || die "--start-id 不能大于 $MAX_ID"
 
 info "检查模板 LXC $TEMPLATE 存在"
 pct config "$TEMPLATE" >/dev/null 2>&1 || die "模板 LXC $TEMPLATE 不存在"
@@ -159,7 +166,22 @@ PY
   fi
 fi
 
-NEXT_ID=$(pvesh get /cluster/nextid)
+NEXT_ID="$(pvesh get /cluster/nextid)"
+[[ "$NEXT_ID" =~ ^[0-9]+$ ]] || die "无法从 PVE 获取空闲 VMID"
+# nextid 返回的是全集群最小空闲号；用户 LXC 从 START_ID 起编号，
+# 所以小于 START_ID 时要在 START_ID 之上继续找第一个空号。
+if [ "$NEXT_ID" -lt "$START_ID" ]; then
+  NEXT_ID=""
+  for ((id = START_ID; id <= MAX_ID; id++)); do
+    if ! pct config "$id" >/dev/null 2>&1; then
+      NEXT_ID="$id"
+      break
+    fi
+  done
+fi
+if [ -z "$NEXT_ID" ]; then
+  die "在 $START_ID-$MAX_ID 范围内没有空闲 VMID，请用 --start-id 指定其他起始号"
+fi
 info "将使用 VMID $NEXT_ID，主机名 oc-$SLUG"
 info "创建失败时请手工清理：pct stop $NEXT_ID && pct destroy $NEXT_ID"
 

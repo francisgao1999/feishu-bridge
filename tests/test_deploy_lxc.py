@@ -43,6 +43,19 @@ class ProxyConfigTest(unittest.TestCase):
         self.assertIn("出站代理", text)
 
 
+class AddUserVmidTest(unittest.TestCase):
+    """用户 LXC 默认从 901 起编号，避免和基础设施 VMID 混在一起。"""
+
+    def test_default_start_id_is_901(self):
+        text = (LXC_DIR / "add-user.sh").read_text(encoding="utf-8")
+        self.assertIn("START_ID=901", text)
+        self.assertIn("MAX_ID=9999", text)
+        self.assertIn("--start-id", text)
+        self.assertIn("pvesh get /cluster/nextid", text)
+        # 起始号被占用时要继续向上找，不能直接失败
+        self.assertIn("for ((id = START_ID; id <= MAX_ID; id++))", text)
+
+
 class SmokeScriptTest(unittest.TestCase):
     """冒烟脚本是发布前的强制检查，接口路径必须和 opencode v2 保持一致。"""
 

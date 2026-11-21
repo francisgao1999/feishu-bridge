@@ -416,6 +416,7 @@ SLUG=$1            # ^[a-z][a-z0-9-]{1,20}$
 OPEN_ID=$2         # ou_...
 IP=$3              # 10.0.0.15
 TEMPLATE=900       # 模板 LXC
+START_ID=901       # 用户 LXC 从 901 起编号
 DOCKER_LXC=100     # 运行 bridge 的 docker LXC
 GATEWAY=10.0.0.1
 
@@ -423,6 +424,7 @@ GATEWAY=10.0.0.1
 [[ "$SLUG" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || die "slug 非法"
 ping -c1 -W1 "$IP" >/dev/null 2>&1 && die "IP 已被占用"
 NEXT_ID=$(pvesh get /cluster/nextid)
+# nextid 小于 START_ID 时，从 START_ID 向上找第一个空闲 VMID
 
 # 2. 从模板克隆
 pct clone "$TEMPLATE" "$NEXT_ID" --hostname "oc-$SLUG" --full
