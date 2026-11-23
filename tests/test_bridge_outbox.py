@@ -64,6 +64,7 @@ class FakeOC:
 class FakeFeishu:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
+        self.fail_file_names: set[str] = set()
 
     async def upload_image_async(self, path: str) -> str:
         self.calls.append(("upload_image", path))
@@ -74,6 +75,8 @@ class FakeFeishu:
 
     async def upload_file_async(self, path: str, name: str) -> str:
         self.calls.append(("upload_file", path, name))
+        if name in self.fail_file_names:
+            raise RuntimeError("Feishu API error 234001: Invalid request param.")
         return "file_key"
 
     async def send_file_async(self, chat_id: str, file_key: str) -> None:
@@ -180,6 +183,69 @@ class BridgeOutboxTest(unittest.TestCase):
         self.oc.entries = [{"type": "directory", "path": "sub"}]
         asyncio.run(self.bridge._deliver_outbox("chat1", "ou_alice"))
         self.assertEqual(self.feishu.calls, [])
+
+    def test_deliver_outbox_skips_empty_files(self) -> None:
+        self.oc.entries = [{"type": "file", "path": "empty.yml"}]
+        self.oc.files["/workspace/outbox/empty.yml"] = b""
+        asyncio.run(self.bridge._deliver_outbox("chat1", "ou_alice"))
+        # 空文件上传会让飞书返回 234001，直接跳过。
+        self.assertEqual(self.feishu.calls, [])
+        asyncio.run(self.bridge._deliver_outbox("chat1", "ou_alice"))
+        self.assertEqual(self.feishu.calls, [])
+        # 跳过不等于失败，不会点亮重试标记。
+        self.assertNotIn("ou_alice", self.bridge._outbox_dirty)
+
+    def test_deliver_outbox_skips_playwright_artifacts(self) -> None:
+        log_name = "console-2026-11-23T03-39-27-114Z.log"
+        page_name = "page-2026-11-23T03-39-30-436Z.yml"
+        self.oc.entries = [
+            {"type": "file", "path": log_name},
+            {"type": "file", "path": page_name},
+            {"type": "file", "path": "report.xlsx"},
+        ]
+        self.oc.files[f"/workspace/outbox/{log_name}"] = b"log"
+        self.oc.files[f"/workspace/outbox/{page_name}"] = b"page: 1\n"
+        self.oc.files["/workspace/outbox/report.xlsx"] = b"xlsx"
+        asyncio.run(self.bridge._deliver_outbox("chat1", "ou_alice"))
+        uploaded = [
+            call[2] for call in self.feishu.calls if call[0] == "upload_file"
+        ]
+        self.assertEqual(uploaded, ["report.xlsx"])
+
+    def test_deliver_outbox_defers_while_task_running(self) -> None:
+        self.oc.entries = [{"type": "file", "path": "report.txt"}]
+        self.oc.files["/workspace/outbox/report.txt"] = b"v1"
+        task_id = self.db.create_task("chat1", "sess1", None, "hi")
+        asyncio.run(self.bridge._deliver_outbox("chat1", "ou_alice"))
+        # 任务运行中不投递中间产物，只标记稍后补投。
+        self.assertEqual(self.feishu.calls, [])
+        self.assertIn("ou_alice", self.bridge._outbox_dirty)
+        self.db.complete_task(task_id, "succeeded")
+        self.oc.files["/workspace/outbox/report.txt"] = b"final"
+        asyncio.run(self.bridge._deliver_outbox("chat1", "ou_alice"))
+        self.assertEqual(
+            [call[0] for call in self.feishu.calls],
+            ["upload_file", "send_file"],
+        )
+
+    def test_deliver_outbox_gives_up_after_max_attempts(self) -> None:
+        self.oc.entries = [{"type": "file", "path": "bad.yml"}]
+        self.oc.files["/workspace/outbox/bad.yml"] = b"data"
+        self.feishu.fail_file_names = {"bad.yml"}
+        for _ in range(4):
+            asyncio.run(self.bridge._deliver_outbox("chat1", "ou_alice"))
+        uploads = [
+            call for call in self.feishu.calls if call[0] == "upload_file"
+        ]
+        self.assertEqual(len(uploads), 3)
+        # 放弃后不再点亮 dirty，避免每分钟无限重试。
+        self.bridge._outbox_dirty.clear()
+        asyncio.run(self.bridge._deliver_outbox("chat1", "ou_alice"))
+        self.assertNotIn("ou_alice", self.bridge._outbox_dirty)
+        uploads = [
+            call for call in self.feishu.calls if call[0] == "upload_file"
+        ]
+        self.assertEqual(len(uploads), 3)
 
     def test_notify_unknown_user_and_cooldown(self) -> None:
         asyncio.run(

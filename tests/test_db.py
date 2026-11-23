@@ -206,6 +206,23 @@ class DatabaseFormTest(unittest.TestCase):
             self.assertIn("interrupted", columns)
 
 
+class TaskStateTest(unittest.TestCase):
+    def test_has_active_task_by_chat(self):
+        db = Database(":memory:")
+        try:
+            db.init()
+            db.ensure_chat("chat1", "ou_alice")
+            db.ensure_chat("chat2", "ou_bob")
+            self.assertFalse(db.has_active_task("chat1"))
+            task_id = db.create_task("chat1", "ses1", None, "prompt")
+            self.assertTrue(db.has_active_task("chat1"))
+            self.assertFalse(db.has_active_task("chat2"))
+            db.complete_task(task_id, "succeeded")
+            self.assertFalse(db.has_active_task("chat1"))
+        finally:
+            db.close()
+
+
 class OutboxSentTest(unittest.TestCase):
     def test_dedupe_round_trip(self):
         db = Database(":memory:")

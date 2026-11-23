@@ -82,6 +82,16 @@ _IMAGE_EXTENSIONS = {
     ".bmp",
 }
 
+# playwright MCP 的运行时产物，不是交付物。它们会落在 outbox 里，
+# 但不能回传给用户：0 字节的 page-*.yml 还会让飞书上传接口报 234001。
+_OUTBOX_ARTIFACT_RE = re.compile(
+    r"^(?:console|page)-\d{4}-\d{2}-\d{2}T[^/]*\.(?:log|yml|yaml)$"
+)
+
+# 单个 outbox 文件投递失败后的最大尝试次数，超过就暂时跳过，
+# 避免一个永远传不上去的文件把 outbox 扫描拖成每分钟死循环。
+_OUTBOX_MAX_ATTEMPTS = 3
+
 
 def _guess_image_ext(path: str) -> str:
     try:
@@ -742,6 +752,8 @@ class Bridge:
         self._pending_attachments: dict[str, list[dict[str, Any]]] = {}
         self._upload_sem = asyncio.Semaphore(2)
         self._outbox_dirty: set[str] = set()
+        # (open_id, 文件名) -> 连续投递失败次数
+        self._outbox_failures: dict[tuple[str, str], int] = {}
 
     # ------------------------------------------------------------------
     # startup / shutdown
@@ -1105,6 +1117,12 @@ class Bridge:
         open_id = open_id or self._open_id_for_chat(chat_id)
         if not open_id:
             return
+        # 任务还在跑的时候 outbox 里多半是中间产物（模型会反复重写同名
+        # xlsx、playwright 会追加日志），此时投递会把半成品反复发出去。
+        # 统一推迟到任务结束后由 outbox_loop 补投。
+        if self.db.has_active_task(chat_id):
+            self._outbox_dirty.add(open_id)
+            return
         workspace = self._workspace_for(open_id)
         outbox = f"{workspace.rstrip('/')}/{self.cfg.outbox_subdir}"
         try:
@@ -1127,21 +1145,55 @@ class Bridge:
             base = os.path.basename(name)
             if base:
                 names.append(base)
+        # 清理已经不存在的失败记录，避免字典无限增长。
+        self._outbox_failures = {
+            key: count
+            for key, count in self._outbox_failures.items()
+            if key[0] != open_id or key[1] in names
+        }
+        names = [
+            name
+            for name in names
+            if not _OUTBOX_ARTIFACT_RE.match(name)
+        ]
         # 单轮最多处理 10 个，避免一次任务结束触发大量下载。
         names.sort()
         batch = names[:10]
         if len(names) > len(batch):
             self._outbox_dirty.add(open_id)
         for name in batch:
+            key = (open_id, name)
+            if (
+                self._outbox_failures.get(key, 0)
+                >= _OUTBOX_MAX_ATTEMPTS
+            ):
+                continue
             remote_path = f"{outbox}/{name}"
             try:
                 await self._deliver_outbox_file(
                     chat_id, open_id, remote_path, name
                 )
             except Exception:
-                log.exception("deliver outbox file %s failed", name)
-                # Retry on the next outbox scan.
-                self._outbox_dirty.add(open_id)
+                attempts = self._outbox_failures.get(key, 0) + 1
+                self._outbox_failures[key] = attempts
+                if attempts < _OUTBOX_MAX_ATTEMPTS:
+                    log.exception(
+                        "deliver outbox file %s failed (attempt %s/%s)",
+                        name,
+                        attempts,
+                        _OUTBOX_MAX_ATTEMPTS,
+                    )
+                    # Retry on the next outbox scan.
+                    self._outbox_dirty.add(open_id)
+                else:
+                    log.error(
+                        "giving up outbox file %s after %s attempts; "
+                        "it will be retried after restart",
+                        name,
+                        attempts,
+                    )
+            else:
+                self._outbox_failures.pop(key, None)
 
     async def _deliver_outbox_file(
         self, chat_id: str, open_id: str, remote_path: str, name: str
@@ -1154,6 +1206,10 @@ class Bridge:
             size = await self.oc.download_file(
                 open_id, remote_path, local_path, workspace
             )
+            if size <= 0:
+                # 空文件飞书会返回 234001，直接跳过，等有内容了再投递。
+                log.info("skip empty outbox file %s", name)
+                return
             digest = _sha256_file(local_path)
             if self.db.is_outbox_sent(open_id, digest, size):
                 return
@@ -1174,9 +1230,9 @@ class Bridge:
                 )
                 # 记入已发送清单，避免每次任务结束都重复提醒；
                 # 文件内容变化后 sha256 不同，会重新提醒。
-                self.db.mark_outbox_sent(open_id, digest, size)
+                self.db.mark_outbox_sent(open_id, digest, size, name)
                 return
-            self.db.mark_outbox_sent(open_id, digest, size)
+            self.db.mark_outbox_sent(open_id, digest, size, name)
             log.info("delivered outbox file %s to %s", name, open_id)
         finally:
             try:
@@ -1185,7 +1241,7 @@ class Bridge:
                 pass
 
     async def outbox_loop(self) -> None:
-        """Retry undelivered outbox files for users with recent activity."""
+        """Retry undelivered outbox files once the chat is idle."""
         while not self._stopping:
             try:
                 await asyncio.sleep(self.cfg.outbox_scan_seconds)

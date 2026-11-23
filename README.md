@@ -193,7 +193,12 @@ scripts/smoke-test.sh --users config/users.json
 - 任务结束时 bridge 扫描 outbox，逐个下载并发回飞书：
   - 图片（≤10MB）→ `im/v1/images`
   - 其他文件（≤30MB）→ `im/v1/files`
-- 用 `(open_id, sha256, size)` 去重，同一个文件不会重复发送。
+- 只有**任务空闲**时才投递：任务运行中 agent 会反复重写同名产物，
+  此时投递会把中间版本发给用户；bridge 会推迟到该聊天没有排队/运行任务后再补投。
+- 用 `(open_id, sha256, size)` 去重，同一个文件不会重复发送；内容变化视为新版本。
+- 空文件（0 字节）直接跳过，不调用飞书上传接口。
+- `console-<时间>.log`、`page-<时间>.yml` 是 playwright MCP 的运行时产物，不投递。
+- 单个文件投递失败最多重试 3 次，之后跳过并记录日志，避免每分钟无限重试。
 - 超过 30MB 的文件不会发送，bridge 会在聊天里提示文件名和大小。
 
 工作区 `/workspace/AGENTS.md` 里写明了这个约定，agent 会自己遵守。
@@ -494,7 +499,7 @@ vzdump 101 --mode snapshot --compress zstd --storage backup
 
 ### 文件回传失败
 
-- 日志 `deliver outbox file ... failed`：应用缺「上传图片或文件资源」权限
+- 日志 `deliver outbox file ... failed`：应用缺「上传图片或文件资源」权限；同一文件重试 3 次后改为 `giving up outbox file ...`，重启 bridge 后会重新尝试
 - 文件超过 30MB：bridge 会提示，不会发送
 - 图片超过 10MB：按文件发送（如果 ≤30MB）
 

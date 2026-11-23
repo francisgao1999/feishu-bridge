@@ -695,6 +695,17 @@ class Database:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def has_active_task(self, chat_id: str) -> bool:
+        """Whether the chat still has queued/running tasks."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM tasks "
+                "WHERE chat_id=? AND status IN ('queued','running') "
+                "LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+            return row is not None
+
     def complete_task(
         self,
         task_id: int,
