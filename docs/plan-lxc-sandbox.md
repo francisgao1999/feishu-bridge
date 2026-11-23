@@ -140,7 +140,7 @@ bridge 不访问 Docker，也不需要任何宿主目录。
 | `app/bridge.py` | 路由接入、SSE 每 url 一循环、按用户对账、入站文件/图片处理、出站 outbox 扫描、未开通用户拒绝与管理员通知、删除临时会话逻辑 |
 | `app/feishu.py` | 新增 `download_resource()`（入站）与 `upload_image()` / `upload_file()` / `send_image()` / `send_file()`（出站） |
 | `app/db.py` | 新增 `outbox_sent` 表（`open_id, sha256, size, sent_at`）及迁移；删除临时会话读写函数 |
-| `app/permissions.py` | `sandbox_mode=container` 时从黑名单剔除 `sudo`/`su`/`service`/`systemctl`，保留破坏性命令 |
+| `app/permissions.py` | `sandbox_mode=container` 时默认放行，仅破坏性命令（`rm`、`git push`、容器删除等）审批 |
 | `app/slash_commands.py` | 删除 `temp` 命令；新增 `smoke` 命令 |
 | `app/main.py` | 按 `users.json` 为每个 url 启动 SSE 循环；关闭时逐个关闭客户端 |
 | `deploy/feishu-opencode-bridge@.service` | 标记为 legacy（保留文件，README 注明已由 compose 取代） |
@@ -294,12 +294,14 @@ OPENCODE_PASSWORD=<与 users.json 一致>
 
 ### 6.7 审批放宽
 
-`sandbox_mode == "container"` 时从 `DANGEROUS_SHELL_PATTERNS` 剔除：
+`sandbox_mode == "container"` 时改为「默认全部放行，仅破坏性操作审批」：
 
-- `sudo *`、`su *`、`doas *`、`pkexec *`
-- `service * start*|stop*|restart*`、`systemctl * ...*`
-
-保留：`rm *`、`mkfs*`、`dd *`、`fdisk *`、`shutdown *` 等破坏性操作。
+- 常规文件编辑、读取 `.env`、跨目录访问、网页抓取、包安装、`sudo`/`service`/`systemctl`、进程信号、容器与 K8s 查询全部放行。
+- 仅以下三类操作保留审批（见 `SANDBOX_DESTRUCTIVE_SHELL_PATTERNS`）：
+  - 文件/磁盘破坏性命令：`rm *`、`mkfs*`、`dd *`、`fdisk *` 等，以及 `find ... -delete`、`xargs ... rm`
+  - Git 不可逆/远程操作：`git push`、`git reset --hard`、`git clean`、`git filter-branch` 等
+  - 容器/编排破坏性操作：`docker rm/rmi/prune/down`、`podman` 同类、`kubectl delete`、`helm uninstall`
+- 只读 Agent（如 `plan`）不注入 `* * allow`，避免覆盖其自身的 `edit * deny`；仅放行 `shell`/`read`/`external_directory`/`webfetch`/`websearch`。
 
 ### 6.8 未开通用户处理
 
@@ -818,7 +820,7 @@ docker compose logs -f
 - [ ] agent 把截图写入 `/workspace/outbox/`，飞书能收到图片消息
 - [ ] 出站超限（图片 >10MB、文件 >30MB）时给出可执行提示
 - [ ] 入站超限（>100MB）时提示拆分或改用链接
-- [ ] `rm -rf` 仍触发审批，`sudo`/`service` 不再触发
+- [ ] `rm -rf`、`git push`、`docker compose down` 仍触发审批，其余操作默认放行
 - [ ] `/temp` 相关命令与文档已移除
 - [ ] 用户 LXC 出站走代理：`/etc/opencode/proxy.env` 生效，`bash -lc 'curl https://api.github.com'` 返回 200
 - [ ] `/workspace/AGENTS.md` 含「网络与代理」一节

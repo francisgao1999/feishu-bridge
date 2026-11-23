@@ -348,7 +348,7 @@ bridge 启动时会把顶层命令同步到飞书输入框 `/` 面板：缺失�
 
 - 会话级规则：普通 `shell` 命令默认 `allow`；危险命令（`rm`、`dd`、`mkfs`、`fdisk`、`shutdown`、`git push --force`、`docker rm` 等）`ask`。
 - 普通 Agent 的 `edit` 仍然全部 `ask`；只读 Agent（`plan`）不注入 `edit * ask`。
-- **沙箱模式**（`BRIDGE_SANDBOX_MODE=container`）下，`sudo`、`service`、`systemctl` 从危险列表剔除，因为用户 LXC 内本来就需要这些命令安装/启动数据库。
+- **沙箱模式**（`BRIDGE_SANDBOX_MODE=container`）下改为「默认放行，仅破坏性操作审批」：文件编辑、读取 `.env`、跨目录访问、网页抓取、包安装、`sudo`/`service`/`systemctl`、进程信号、容器与 K8s 查询都不再弹审批卡；只有 `rm`/`dd`/`mkfs` 等破坏性文件命令、不可逆 Git 操作（`git push`、`reset --hard`、`clean` 等）、容器删除类操作（`docker rm`、`docker compose down`、`kubectl delete`、`helm uninstall` 等）仍会 `ask`。只读 Agent 仅放行 `shell`/`read`/`external_directory`/`webfetch`/`websearch`，保留其 `edit * deny`。
 - 审批卡片只有「允许一次」和「拒绝」，没有“总是批准”。
 - 10 分钟未处理发文字提醒，30 分钟自动拒绝并中止任务。
 - 审批卡片只发到任务发起人的私聊；回调会校验点击者是否在白名单内。

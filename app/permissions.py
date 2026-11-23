@@ -184,67 +184,60 @@ def _wildcard_match(value: str, pattern: str) -> bool:
     return re.match(regex, value) is not None
 
 
-# Patterns relaxed when the bridge runs in sandbox mode (one LXC per user).
+# Shell commands that still require approval in sandbox mode.
 #
-# Inside the per-user LXC the agent already runs as root, so ``sudo``/``su``
-# are noise and ``systemctl``/``service`` are how the user manages their own
-# PostgreSQL or MySQL. Installing packages is an intended workflow (``.sql``
-# imports), so ``apt install`` and friends are allowed without approval while
-# full upgrades stay gated.
-SANDBOX_RELAXED_PATTERNS: frozenset[str] = frozenset(
-    {
-        "sudo *",
-        "su *",
-        "doas *",
-        "pkexec *",
-        "systemctl *start*",
-        "systemctl *stop*",
-        "systemctl *restart*",
-        "systemctl *reload*",
-        "systemctl *enable*",
-        "systemctl *disable*",
-        "systemctl *mask*",
-        "systemctl *unmask*",
-        "systemctl *daemon-reload*",
-        "systemctl *daemon-reexec*",
-        "systemctl *isolate*",
-        "systemctl *kill*",
-        "systemctl *set-property*",
-        "systemctl *edit*",
-        "systemctl *revert*",
-        "service * start*",
-        "service * stop*",
-        "service * restart*",
-        "service * reload*",
-        "shutdown *",
-        "reboot *",
-        "poweroff *",
-        "halt *",
-        "useradd *",
-        "userdel *",
-        "usermod *",
-        "groupadd *",
-        "groupdel *",
-        "passwd *",
-        "crontab *",
-        "at *",
-        "apt install*",
-        "apt remove*",
-        "apt purge*",
-        "apt-get install*",
-        "apt-get remove*",
-        "apt-get purge*",
-    }
-)
-
-# Explicit allows appended after the ask rules so they win in sandbox mode.
-SANDBOX_ALLOWED_PATTERNS: tuple[str, ...] = (
-    "apt install*",
-    "apt remove*",
-    "apt purge*",
-    "apt-get install*",
-    "apt-get remove*",
-    "apt-get purge*",
+# The sandbox runs one LXC per user, so privilege escalation, service control,
+# package management, process signals, container/K8s management and reads of
+# files outside the workspace are accepted as normal work. Only operations
+# that can destroy data or rewrite shared history stay behind a card.
+SANDBOX_DESTRUCTIVE_SHELL_PATTERNS: tuple[str, ...] = (
+    # A. Destructive file and disk operations
+    "rm *",
+    "rmdir *",
+    "unlink *",
+    "shred *",
+    "truncate *",
+    "dd *",
+    "mkfs*",
+    "wipefs *",
+    "fdisk *",
+    "parted *",
+    "sgdisk *",
+    "mkswap *",
+    "swapoff *",
+    "find * -delete*",
+    "find * -exec rm*",
+    "find * -exec */rm*",
+    "xargs * rm*",
+    # B. Irreversible or remote git operations
+    "git *push*",
+    "git *reset --hard*",
+    "git *clean*",
+    "git *checkout --*",
+    "git *restore*",
+    "git *branch -D*",
+    "git *tag -d*",
+    "git *remote remove*",
+    "git *stash drop*",
+    "git *stash clear*",
+    "git *filter-branch*",
+    "git *filter-repo*",
+    # C. Destructive container and orchestration operations
+    "docker rm*",
+    "docker rmi*",
+    "docker * prune*",
+    "docker volume rm*",
+    "docker network rm*",
+    "docker compose down*",
+    "docker-compose down*",
+    "podman rm*",
+    "podman rmi*",
+    "podman * prune*",
+    "podman volume rm*",
+    "podman network rm*",
+    "podman-compose down*",
+    "kubectl delete*",
+    "helm uninstall*",
 )
 
 
@@ -286,24 +279,21 @@ def build_session_permissions(
     ``edit * ask`` rule, otherwise it would override the agent's own
     ``edit * deny`` rule.
 
-    In ``sandbox_mode`` the bridge runs one LXC per user, so privilege and
-    service-management patterns are relaxed and package installs are allowed.
+    In ``sandbox_mode`` the bridge runs one LXC per user and only destructive
+    shell commands (see ``SANDBOX_DESTRUCTIVE_SHELL_PATTERNS``) keep asking for
+    approval; file edits, sensitive reads, cross-directory access, web fetches
+    and package installs are allowed.
     """
     read_only = agent in readonly_agents or agent_is_read_only(agent_info)
+    if sandbox_mode:
+        return _build_sandbox_permissions(read_only)
     rules: list[dict[str, str]] = [
         # Allow routine shell commands. Specific rules below override this.
         {"action": "shell", "resource": "*", "effect": "allow"},
     ]
-    patterns = DANGEROUS_SHELL_PATTERNS
-    if sandbox_mode:
-        patterns = tuple(
-            pattern
-            for pattern in DANGEROUS_SHELL_PATTERNS
-            if pattern not in SANDBOX_RELAXED_PATTERNS
-        )
     rules.extend(
         {"action": "shell", "resource": pattern, "effect": "ask"}
-        for pattern in patterns
+        for pattern in DANGEROUS_SHELL_PATTERNS
     )
     # .env.example is safe to read even though it matches cat *.env.*.
     rules.append(
@@ -313,11 +303,6 @@ def build_session_permissions(
             "effect": "allow",
         }
     )
-    if sandbox_mode:
-        rules.extend(
-            {"action": "shell", "resource": pattern, "effect": "allow"}
-            for pattern in SANDBOX_ALLOWED_PATTERNS
-        )
     if not read_only:
         # File edits still require approval for normal agents.
         rules.append({"action": "edit", "resource": "*", "effect": "ask"})
@@ -328,5 +313,33 @@ def build_session_permissions(
             {"action": "read", "resource": "*.env.*", "effect": "ask"},
             {"action": "read", "resource": "*.env.example", "effect": "allow"},
         ]
+    )
+    return rules
+
+
+def _build_sandbox_permissions(read_only: bool) -> list[dict[str, str]]:
+    """Sandbox rules: allow everything except destructive shell commands.
+
+    Rules are evaluated in order and the last match wins. Read-only agents
+    (``plan``) must not get a wildcard allow, because a session-level
+    ``* * allow`` would override their own ``edit * deny``.
+    """
+    rules: list[dict[str, str]] = []
+    if read_only:
+        rules.extend(
+            {"action": action, "resource": "*", "effect": "allow"}
+            for action in (
+                "shell",
+                "read",
+                "external_directory",
+                "webfetch",
+                "websearch",
+            )
+        )
+    else:
+        rules.append({"action": "*", "resource": "*", "effect": "allow"})
+    rules.extend(
+        {"action": "shell", "resource": pattern, "effect": "ask"}
+        for pattern in SANDBOX_DESTRUCTIVE_SHELL_PATTERNS
     )
     return rules
