@@ -446,7 +446,7 @@ OpenCode 的 `question` 工具会创建 form，等待用户输入。bridge 把�
 
 ### 用户 LXC 配置
 
-- `deploy/lxc/opencode-serve.service`：systemd 单元，监听 `0.0.0.0:4096`，`EnvironmentFile=/etc/opencode/serve.env`
+- `deploy/lxc/opencode-serve.service`：systemd 单元，监听 `0.0.0.0:4096`，按 `proxy.env` → `service.env` → `serve.env` 顺序加载 `EnvironmentFile`（均为可选）
 - `deploy/lxc/opencode.jsonc`：模型、agent、MCP 配置
 - `/etc/opencode/serve.env`：`OPENCODE_PASSWORD=...`（600）
 - `deploy/lxc/workspace-AGENTS.md`：工作区约定，放到 `/workspace/AGENTS.md`
