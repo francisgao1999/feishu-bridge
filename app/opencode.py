@@ -445,6 +445,38 @@ class OpenCodeClient:
             pass
         return parse_model_catalog(data, provider_names)
 
+    async def session_stats(
+        self,
+        *,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        timezone: str | None = None,
+        tools: str = "summary",
+    ) -> dict[str, Any]:
+        """Aggregate session usage for a time range.
+
+        ``from_ms``/``to_ms`` are epoch milliseconds; omit both for the
+        server's lifetime range. The endpoint is experimental, so callers
+        should treat a 404 as "this OpenCode version does not support it".
+        """
+        params: dict[str, str] = {}
+        if from_ms is not None:
+            params["from"] = str(from_ms)
+        if to_ms is not None:
+            params["to"] = str(to_ms)
+        if timezone:
+            params["timezone"] = timezone
+        if tools:
+            params["tools"] = tools
+        data = await self._request(
+            "GET", "/api/experimental/session/stats", params=params or None
+        )
+        if isinstance(data, dict):
+            payload = data.get("data")
+            if isinstance(payload, dict):
+                return payload
+        return {}
+
     async def switch_model(
         self, session_id: str, provider_id: str, model_id: str
     ) -> None:
@@ -794,6 +826,11 @@ class OpenCodeRouter:
 
     async def list_models(self, open_id: str) -> list[dict[str, str]]:
         return await self.client_for(open_id).list_models()
+
+    async def session_stats(
+        self, open_id: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        return await self.client_for(open_id).session_stats(**kwargs)
 
     async def list_agents(
         self, open_id: str, directory: str | None = None

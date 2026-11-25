@@ -245,6 +245,7 @@ scripts/smoke-test.sh --users config/users.json
 - `/delete <编号>` 或 `/remove`、`/删除`：删除空闲会话
 - `/clean [confirm]` 或 `/清理`：清理空闲会话
 - `/status`：状态
+- `/stats [7|14|30|today|year|all]` 或 `/用量`：OpenCode 用量统计
 - `/stop`：中止任务
 - `/model`：模型选择卡片
 - `/agent`：Agent 选择卡片
@@ -268,6 +269,22 @@ bridge 启动时会把顶层命令同步到飞书输入框 `/` 面板：缺失�
 - 完整日志（最近 200 行，内存上限）放在折叠面板里，点击展开；不落文件。
 - 卡片更新按 `BRIDGE_PROGRESS_MIN_INTERVAL` 节流（默认 5 秒）；任务结束会强制刷新一次，保证最终状态一定落到卡片上。
 - 流式信息只更新原进度卡，不额外发新卡；结果卡仍是任务完成后单独发送的一张新卡。
+
+## 用量统计
+
+`/stats` 读取用户 LXC 内 OpenCode 的 `GET /api/experimental/session/stats`，以卡片形式返回会话数、提示数、步数、Token、工具成功率、活跃天数和模型用量。
+
+```
+/stats          最近 14 天 + 本月汇总 + 模型前三（默认）
+/stats 7        最近 7 天，也可 14 / 30 / today
+/stats year     今年；/stats 2025 指定年份
+/stats all      全部历史
+```
+
+- 默认视图不显示日历热力图，也不生成图片。
+- 卡片按 Asia/Shanghai 时区统计日活；`from`/`to` 使用 epoch 毫秒。
+- 该接口是 experimental：用户 LXC 的 opencode 版本过旧时会返回 404，bridge 会提示升级。
+- 定时推送：`/schedule daily 22:00 stats`（也可写 `/schedule daily 22:00 用量统计`），到点直接发统计卡片，不创建会话。
 
 ## 多会话并行
 

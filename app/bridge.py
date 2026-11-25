@@ -49,6 +49,12 @@ from forms import (
 )
 from opencode import OpenCodeClient, OpenCodeError, OpenCodeSyncClient
 from permissions import build_session_permissions
+from stats import (
+    STATS_TIMEZONE,
+    build_stats_queries,
+    stats_card,
+    stats_help_text,
+)
 from users import UserRegistry
 
 log = logging.getLogger(__name__)
@@ -297,12 +303,16 @@ def parse_schedule_text(text: str) -> dict[str, Any] | None:
         return None
 
     mode = "task"
-    reminder = _parse_reminder(prompt)
-    if reminder:
-        mode = "reminder"
-        prompt = reminder
-    elif _REMINDER_RE.match(prompt):
-        return None
+    if _is_stats_request(prompt):
+        mode = "stats"
+        prompt = "用量统计"
+    else:
+        reminder = _parse_reminder(prompt)
+        if reminder:
+            mode = "reminder"
+            prompt = reminder
+        elif _REMINDER_RE.match(prompt):
+            return None
 
     return {
         "kind": kind,
@@ -389,6 +399,32 @@ def _parse_reminder(text: str) -> str | None:
         return None
     content = _strip_wrapping(match.group("content"))
     return content or None
+
+
+_STATS_REQUESTS = {
+    "stats",
+    "usage",
+    "opencode stats",
+    "用量",
+    "用量统计",
+    "统计用量",
+}
+
+
+def _is_stats_request(text: str) -> bool:
+    """Whether a schedule prompt asks for the usage-stats card."""
+    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    normalized = re.sub(r"(?:卡片|报告)$", "", normalized).strip()
+    while True:
+        stripped = re.sub(
+            r"^(?:发送|推送|生成|查看|给我|帮我|请|麻烦|发|来|看)\s*",
+            "",
+            normalized,
+        )
+        if stripped == normalized:
+            break
+        normalized = stripped
+    return normalized in _STATS_REQUESTS
 
 
 def _looks_like_once(text: str) -> bool:
@@ -519,16 +555,20 @@ def _parse_once_text(text: str) -> dict[str, Any] | None:
     if not rest:
         return None
 
-    reminder = _parse_reminder(rest)
-    if reminder:
-        mode = "reminder"
-        prompt = reminder
-    elif _REMINDER_RE.match(rest):
-        # 明确写了「提醒我」但没有内容，按无效处理，避免变成普通任务。
-        return None
+    if _is_stats_request(rest):
+        mode = "stats"
+        prompt = "用量统计"
     else:
-        mode = "task"
-        prompt = rest
+        reminder = _parse_reminder(rest)
+        if reminder:
+            mode = "reminder"
+            prompt = reminder
+        elif _REMINDER_RE.match(rest):
+            # 明确写了「提醒我」但没有内容，按无效处理，避免变成普通任务。
+            return None
+        else:
+            mode = "task"
+            prompt = rest
     if not prompt:
         return None
 
@@ -1503,6 +1543,8 @@ class Bridge:
             await self._cmd_schedule(chat_id, open_id, argument)
         elif command == "/status":
             await self._cmd_status(chat_id)
+        elif command in ("/stats", "/stat", "/用量"):
+            await self._cmd_stats(chat_id, open_id, argument)
         elif command == "/model":
             await self._cmd_model(chat_id, open_id, argument)
         elif command == "/agent":
@@ -2081,6 +2123,53 @@ class Bridge:
         )
         await self.feishu.send_card_async(chat_id, card)
 
+    async def _cmd_stats(
+        self, chat_id: str, open_id: str, argument: str
+    ) -> None:
+        queries = build_stats_queries(argument)
+        if queries is None:
+            await self.feishu.send_text_async(chat_id, stats_help_text())
+            return
+
+        results: list[dict[str, Any]] = []
+        try:
+            for query in queries:
+                results.append(
+                    await self.oc.session_stats(
+                        open_id,
+                        from_ms=query.from_ms,
+                        to_ms=query.to_ms,
+                        timezone=STATS_TIMEZONE,
+                    )
+                )
+        except OpenCodeError as exc:
+            log.exception("session stats failed")
+            if exc.status_code == 404:
+                await self.feishu.send_text_async(
+                    chat_id,
+                    "当前 OpenCode 版本不支持用量统计接口"
+                    "（/api/experimental/session/stats）。"
+                    "请升级用户 LXC 内的 opencode。",
+                )
+            else:
+                await self.feishu.send_text_async(
+                    chat_id, f"获取用量统计失败: {exc}"
+                )
+            return
+        except Exception as exc:
+            log.exception("session stats failed")
+            await self.feishu.send_text_async(
+                chat_id, f"获取用量统计失败: {exc}"
+            )
+            return
+
+        card = stats_card(
+            queries=queries,
+            results=results,
+            note=f"统计范围：用户 OpenCode 会话 · 时区 {STATS_TIMEZONE}",
+        )
+        await self.feishu.send_card_async(chat_id, card)
+
     async def _cmd_model(
         self, chat_id: str, open_id: str, argument: str
     ) -> None:
@@ -2559,17 +2648,21 @@ class Bridge:
             return
         time_of_day, prompt = parsed
         mode = "task"
-        reminder = _parse_reminder(prompt)
-        if reminder:
-            mode = "reminder"
-            prompt = reminder
-        elif _REMINDER_RE.match(prompt):
-            await self.feishu.send_text_async(
-                chat_id,
-                "提醒内容不能为空。例如："
-                "/schedule daily 10:00 提醒我【喝水】",
-            )
-            return
+        if _is_stats_request(prompt):
+            mode = "stats"
+            prompt = "用量统计"
+        else:
+            reminder = _parse_reminder(prompt)
+            if reminder:
+                mode = "reminder"
+                prompt = reminder
+            elif _REMINDER_RE.match(prompt):
+                await self.feishu.send_text_async(
+                    chat_id,
+                    "提醒内容不能为空。例如："
+                    "/schedule daily 10:00 提醒我【喝水】",
+                )
+                return
         await self._create_schedule(
             chat_id,
             open_id,
@@ -2627,7 +2720,12 @@ class Bridge:
                         status = "已暂停"
                 else:
                     status = "待执行"
-                label = "单次提醒" if mode == "reminder" else "单次任务"
+                if mode == "reminder":
+                    label, prompt_label = "单次提醒", "提醒"
+                elif mode == "stats":
+                    label, prompt_label = "单次用量统计", "统计"
+                else:
+                    label, prompt_label = "单次任务", "任务"
                 when = datetime.fromtimestamp(
                     schedule["next_run_at"], SCHEDULE_TZ
                 ).strftime("%m-%d %H:%M")
@@ -2636,8 +2734,7 @@ class Bridge:
                 )
                 lines.append(f"   {label} · {when}")
                 lines.append(
-                    f"   {'提醒' if mode == 'reminder' else '任务'}："
-                    f"{_short(schedule['prompt'], 120)}"
+                    f"   {prompt_label}：{_short(schedule['prompt'], 120)}"
                 )
                 if mode == "task" and schedule.get("last_task_id"):
                     last_task = self.db.get_task(schedule["last_task_id"])
@@ -2661,9 +2758,14 @@ class Bridge:
                 f"#{schedule['id']} {schedule['title']}  [{status}]"
             )
             lines.append(f"   {label} · 下次 {next_run}")
+            if mode == "reminder":
+                prompt_label = "提醒"
+            elif mode == "stats":
+                prompt_label = "统计"
+            else:
+                prompt_label = "任务"
             lines.append(
-                f"   {'提醒' if mode == 'reminder' else '任务'}："
-                f"{_short(schedule['prompt'], 120)}"
+                f"   {prompt_label}：{_short(schedule['prompt'], 120)}"
             )
             if mode == "task" and schedule.get("last_task_id"):
                 last_task = self.db.get_task(schedule["last_task_id"])
@@ -2810,11 +2912,12 @@ class Bridge:
             )
             return
         if schedule["kind"] == "once":
-            noun = (
-                "单次提醒"
-                if schedule.get("mode") == "reminder"
-                else "单次任务"
-            )
+            if schedule.get("mode") == "reminder":
+                noun = "单次提醒"
+            elif schedule.get("mode") == "stats":
+                noun = "单次用量统计"
+            else:
+                noun = "单次任务"
             if schedule.get("last_run_at"):
                 await self.feishu.send_text_async(
                     chat_id,
@@ -2832,11 +2935,12 @@ class Bridge:
                     "请发送 /schedule list 查看。",
                 )
                 return
-        action = (
-            "发送提醒"
-            if schedule.get("mode") == "reminder"
-            else "立即执行定时任务"
-        )
+        if schedule.get("mode") == "reminder":
+            action = "发送提醒"
+        elif schedule.get("mode") == "stats":
+            action = "发送用量统计"
+        else:
+            action = "立即执行定时任务"
         await self.feishu.send_text_async(
             chat_id,
             f"正在{action} #{schedule['id']}：{schedule['title']}",
@@ -2870,7 +2974,7 @@ class Bridge:
             mode=mode,
         )
         session_id: str | None = None
-        if mode != "reminder":
+        if mode not in ("reminder", "stats"):
             try:
                 session_id = await self._create_session(
                     chat_id,
@@ -2899,6 +3003,12 @@ class Bridge:
                     f"内容：{_short(prompt, 200)}",
                     "到点会直接发送提醒卡片，不创建会话。",
                 ]
+            elif mode == "stats":
+                lines = [
+                    f"已创建单次用量统计 #{schedule_id}：{title}",
+                    f"执行时间：{when}",
+                    "到点会直接发送用量统计卡片，不创建会话。",
+                ]
             else:
                 lines = [
                     f"已创建单次任务 #{schedule_id}：{title}",
@@ -2916,6 +3026,13 @@ class Bridge:
                     f"下次执行：{when}",
                     f"提醒：{_short(prompt, 200)}",
                     "到点会直接发送提醒卡片，不创建会话。",
+                ]
+            elif mode == "stats":
+                lines = [
+                    f"已创建定时用量统计 #{schedule_id}：{title}",
+                    f"周期：{_schedule_label(kind, time_of_day, weekday)}",
+                    f"下次执行：{when}",
+                    "到点会直接发送用量统计卡片，不创建会话。",
                 ]
             else:
                 lines = [
@@ -2974,6 +3091,12 @@ class Bridge:
         return session_id
 
     async def _run_schedule(self, schedule: dict[str, Any]) -> None:
+        if schedule.get("mode") == "stats":
+            await self._cmd_stats(
+                schedule["chat_id"], schedule["open_id"], ""
+            )
+            log.info("schedule %s sent stats", schedule["id"])
+            return
         if schedule.get("mode") == "reminder":
             when = datetime.fromtimestamp(
                 schedule["next_run_at"], SCHEDULE_TZ

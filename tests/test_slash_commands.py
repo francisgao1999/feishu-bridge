@@ -36,6 +36,7 @@ EXPECTED_COMMANDS = {
     "clean",
     "schedule",
     "status",
+    "stats",
     "model",
     "agent",
     "stop",

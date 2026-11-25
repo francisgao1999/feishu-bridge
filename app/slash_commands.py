@@ -48,6 +48,11 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         "Show session, task and approval status",
     ),
     SlashCommand(
+        "stats",
+        "查看 OpenCode 用量统计",
+        "Show OpenCode usage statistics",
+    ),
+    SlashCommand(
         "stop",
         "中止任务并清理待审批",
         "Stop the task and clear pending approvals",

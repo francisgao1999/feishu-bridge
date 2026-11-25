@@ -13,6 +13,7 @@ try:
     from bridge import (  # noqa: E402
         _guess_image_ext,
         _human_size,
+        _is_stats_request,
         _sha256_file,
         _short,
     )
@@ -20,6 +21,7 @@ except ImportError:  # pragma: no cover - app/ layout without flat imports
     from app.bridge import (  # noqa: E402
         _guess_image_ext,
         _human_size,
+        _is_stats_request,
         _sha256_file,
         _short,
     )
@@ -33,6 +35,27 @@ class ShortTest(unittest.TestCase):
         result = _short("x" * 200, limit=10)
         self.assertEqual(len(result), 10)
         self.assertTrue(result.endswith("…"))
+
+
+class StatsRequestTest(unittest.TestCase):
+    def test_accepts_common_phrases(self):
+        for text in (
+            "stats",
+            "用量",
+            "用量统计",
+            "发送用量统计",
+            "给我推送用量统计卡片",
+            "Usage",
+        ):
+            self.assertTrue(_is_stats_request(text), text)
+
+    def test_rejects_normal_prompts(self):
+        for text in (
+            "发送昨日到现在 linux.do 福利羊毛板块的帖子摘要",
+            "整理周报",
+            "查看统计报告",
+        ):
+            self.assertFalse(_is_stats_request(text), text)
 
 
 class HumanSizeTest(unittest.TestCase):
